@@ -78,11 +78,6 @@ done:
 	dbus_message_unref(reply);
 }
 
-static void append_string(DBusMessageIter *iter, void *user_data)
-{
-	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, user_data);
-}
-
 static void append_string_list(DBusMessageIter *iter, void *user_data)
 {
 	char **list = user_data;
@@ -177,11 +172,6 @@ static void create_proxy_configuration(void)
 						DBUS_TYPE_STRING, &interface);
 		g_free(interface);
 	}
-
-	str = connman_service_get_domainname(default_service);
-	if (str)
-		connman_dbus_dict_append_array(&dict, "Domains",
-					DBUS_TYPE_STRING, append_string, &str);
 
 	str_list = connman_service_get_nameservers(default_service);
 	if (str_list)
@@ -287,7 +277,7 @@ static void proxy_changed(struct connman_service *service)
 	create_proxy_configuration();
 }
 
-static struct connman_notifier pacrunner_notifier = {
+static const struct connman_notifier pacrunner_notifier = {
 	.name			= "pacrunner",
 	.default_changed	= default_service_changed,
 	.proxy_changed		= proxy_changed,

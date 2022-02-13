@@ -66,7 +66,7 @@ static GHashTable *gid_hash;     /* (gid, policy_group) */
 struct policy_file {
 	/*
 	 * A valid file is a keyfile with one ore more groups. All
-	 * groups are keept in this list.
+	 * groups are kept in this list.
 	 */
 	GSList *groups;
 };
@@ -134,7 +134,7 @@ static char *parse_selinux_type(const char *context)
 
 	/*
 	 * SELinux combines Role-Based Access Control (RBAC), Type
-	 * Enforcment (TE) and optionally Multi-Level Security (MLS).
+	 * Enforcement (TE) and optionally Multi-Level Security (MLS).
 	 *
 	 * When SELinux is enabled all processes and files are labeled
 	 * with a contex that contains information such as user, role
@@ -145,7 +145,7 @@ static char *parse_selinux_type(const char *context)
 	 *
 	 * For identifyng application we (ab)using the type
 	 * information. In the above example the haifux_exec_t type
-	 * will be transfered to haifux_t as defined in the domain
+	 * will be transferred to haifux_t as defined in the domain
 	 * transition and thus we are able to identify the application
 	 * as haifux_t.
 	 */
@@ -271,10 +271,8 @@ static void get_uid_reply(unsigned int uid, void *user_data, int err)
 
 	DBG("session %p uid %d", policy->session, uid);
 
-	if (err < 0) {
-		cleanup_config(policy);
+	if (err < 0)
 		goto err;
-	}
 
 	pwd = getpwuid((uid_t)uid);
 	if (!pwd) {
@@ -333,7 +331,7 @@ static void get_uid_reply(unsigned int uid, void *user_data, int err)
 	return;
 
 err:
-	failed_create(NULL, cb, cbd->user_data, err);
+	failed_create(policy, cb, cbd->user_data, err);
 	g_free(cbd);
 	g_free(groups);
 }
