@@ -184,7 +184,7 @@ int vpn_rtnl_register(struct vpn_rtnl *rtnl)
 	rtnl_list = g_slist_insert_sorted(rtnl_list, rtnl,
 							compare_priority);
 
-	__vpn_ipconfig_foreach(trigger_rtnl, rtnl);
+	vpn_ipconfig_foreach(trigger_rtnl, rtnl);
 
 	return 0;
 }
@@ -879,7 +879,7 @@ static void rtnl_message(void *buf, size_t len)
 		if (!NLMSG_OK(hdr, len))
 			break;
 
-		debug("%s len %d type %d flags 0x%04x seq %d pid %d",
+		debug("%s len %u type %u flags 0x%04x seq %u pid %u",
 					type2string(hdr->nlmsg_type),
 					hdr->nlmsg_len, hdr->nlmsg_type,
 					hdr->nlmsg_flags, hdr->nlmsg_seq,

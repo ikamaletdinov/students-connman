@@ -28,6 +28,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <resolv.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -314,7 +315,8 @@ static int match_gai_table(struct sockaddr *sa, const struct gai_table *tbl)
 	}
 }
 
-#define DQUAD(_a,_b,_c,_d) ( ((_a)<<24) | ((_b)<<16) | ((_c)<<8) | (_d) )
+#define DQUAD(_a,_b,_c,_d) ( (((uint32_t)_a)<<24) | (((uint32_t)_b)<<16) | \
+				(((uint32_t)_c)<<8) | ((uint32_t)_d) )
 #define V4MATCH(addr, a,b,c,d, m) ( ((addr) ^ DQUAD(a,b,c,d)) >> (32 - (m)) )
 
 #define RFC3484_SCOPE_LINK	2
@@ -325,7 +327,7 @@ static int addr_scope(struct sockaddr *sa)
 {
 	if (sa->sa_family == AF_INET) {
 		struct sockaddr_in *sin = (void *)sa;
-		guint32 addr = ntohl(sin->sin_addr.s_addr);
+		uint32_t addr = ntohl(sin->sin_addr.s_addr);
 
 		if (V4MATCH(addr, 169,254,0,0, 16) ||
 					V4MATCH(addr, 127,0,0,0, 8))
@@ -511,7 +513,7 @@ static void sort_and_return_results(struct resolv_lookup *lookup)
 			status = lookup->ipv4_status;
 	}
 
-	debug(lookup->resolv, "lookup %p received %d results", lookup, n);
+	debug(lookup->resolv, "lookup %p received %d results", lookup, n-1);
 
 	g_queue_remove(lookup->resolv->lookup_queue, lookup);
 	destroy_lookup(lookup);
@@ -679,7 +681,10 @@ static void parse_response(struct resolv_nameserver *nameserver,
 
 	switch (rcode) {
 	case ns_r_noerror:
-		status = G_RESOLV_RESULT_STATUS_SUCCESS;
+		if (count > 0)
+			status = G_RESOLV_RESULT_STATUS_SUCCESS;
+		else
+			status = G_RESOLV_RESULT_STATUS_NO_ANSWER;
 		break;
 	case ns_r_formerr:
 		status = G_RESOLV_RESULT_STATUS_FORMAT_ERROR;

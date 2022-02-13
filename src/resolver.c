@@ -23,7 +23,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -84,9 +83,22 @@ static void resolvfile_remove_entries(GList *entries)
 	g_list_free(entries);
 }
 
-static int resolvfile_export(void)
+static bool already_exported(GList *export_list, const char *str)
 {
 	GList *list;
+
+	for (list = export_list; list; list = g_list_next(list)) {
+		const char *str0 = list->data;
+		if (g_strcmp0(str0, str) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+static int resolvfile_export(void)
+{
+	GList *list, *export_list;
 	GString *content;
 	int fd, err;
 	unsigned int count;
@@ -100,36 +112,52 @@ static int resolvfile_export(void)
 	 * MAXDNSRCH/MAXNS entries are used.
 	 */
 
-	for (count = 0, list = g_list_last(resolvfile_list);
+	export_list = NULL;
+	for (count = 0, list = g_list_first(resolvfile_list);
 						list && (count < MAXDNSRCH);
-						list = g_list_previous(list)) {
+						list = g_list_next(list)) {
 		struct resolvfile_entry *entry = list->data;
 
 		if (!entry->domain)
+			continue;
+
+		if (already_exported(export_list, entry->domain))
 			continue;
 
 		if (count == 0)
 			g_string_append_printf(content, "search ");
 
 		g_string_append_printf(content, "%s ", entry->domain);
+
+		export_list = g_list_append(export_list, entry->domain);
+
 		count++;
 	}
+	g_list_free(export_list);
+
 
 	if (count)
 		g_string_append_printf(content, "\n");
 
-	for (count = 0, list = g_list_last(resolvfile_list);
+	export_list = NULL;
+	for (count = 0, list = g_list_first(resolvfile_list);
 						list && (count < MAXNS);
-						list = g_list_previous(list)) {
+						list = g_list_next(list)) {
 		struct resolvfile_entry *entry = list->data;
 
 		if (!entry->server)
 			continue;
 
-		g_string_append_printf(content, "nameserver %s\n",
-								entry->server);
+		if (already_exported(export_list, entry->server))
+			continue;
+
+		g_string_append_printf(content, "nameserver %s\n", entry->server);
+
+		export_list = g_list_append(export_list, entry->server);
+
 		count++;
 	}
+	g_list_free(export_list);
 
 	old_umask = umask(022);
 
@@ -173,7 +201,7 @@ int __connman_resolvfile_append(int index, const char *domain,
 {
 	struct resolvfile_entry *entry;
 
-	DBG("index %d server %s", index, server);
+	DBG("index %d domain %s server %s", index, domain, server);
 
 	if (index < 0)
 		return -ENOENT;
@@ -196,7 +224,7 @@ int __connman_resolvfile_remove(int index, const char *domain,
 {
 	GList *list, *matches = NULL;
 
-	DBG("index %d server %s", index, server);
+	DBG("index %d domain %s server %s", index, domain, server);
 
 	for (list = resolvfile_list; list; list = g_list_next(list)) {
 		struct resolvfile_entry *entry = list->data;
@@ -652,12 +680,28 @@ static void free_resolvfile(gpointer data)
 	g_free(entry);
 }
 
+int __connman_resolver_set_mdns(int index, bool enabled)
+{
+	if (!dnsproxy_enabled)
+		return -ENOTSUP;
+
+	return __connman_dnsproxy_set_mdns(index, enabled);
+}
+
 int __connman_resolver_init(gboolean dnsproxy)
 {
 	int i;
 	char **ns;
 
 	DBG("dnsproxy %d", dnsproxy);
+
+	/* get autoip nameservers */
+	ns = __connman_inet_get_pnp_nameservers(NULL);
+	for (i = 0; ns && ns[i]; i += 1) {
+		DBG("pnp server %s", ns[i]);
+		append_resolver(i, NULL, ns[i], 86400, 0);
+	}
+	g_strfreev(ns);
 
 	if (!dnsproxy)
 		return 0;

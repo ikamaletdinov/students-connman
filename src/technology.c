@@ -100,7 +100,7 @@ static void rfkill_check(gpointer key, gpointer value, gpointer user_data)
 	struct connman_rfkill *rfkill = value;
 	enum connman_service_type type = GPOINTER_TO_INT(user_data);
 
-	/* Calling _technology_rfkill_add will update the tech. */
+	/* Calling _technology_add_rfkill will update the tech. */
 	if (rfkill->type == type)
 		__connman_technology_add_rfkill(rfkill->index, type,
 				rfkill->softblock, rfkill->hardblock);
@@ -185,10 +185,12 @@ static void technology_save(struct connman_technology *technology)
 					"Tethering.Identifier",
 					technology->tethering_ident);
 
-	if (technology->tethering_passphrase)
+	if (technology->tethering_passphrase) {
+		char *enc = g_strescape(technology->tethering_passphrase, NULL);
 		g_key_file_set_string(keyfile, identifier,
-					"Tethering.Passphrase",
-					technology->tethering_passphrase);
+					"Tethering.Passphrase", enc);
+		g_free(enc);
+	}
 
 done:
 	g_free(identifier);
@@ -196,8 +198,6 @@ done:
 	__connman_storage_save_global(keyfile);
 
 	g_key_file_free(keyfile);
-
-	return;
 }
 
 static void tethering_changed(struct connman_technology *technology)
@@ -211,22 +211,27 @@ static void tethering_changed(struct connman_technology *technology)
 	technology_save(technology);
 }
 
-void connman_technology_tethering_notify(struct connman_technology *technology,
+int connman_technology_tethering_notify(struct connman_technology *technology,
 							bool enabled)
 {
+	int err;
+
 	DBG("technology %p enabled %u", technology, enabled);
 
 	if (technology->tethering == enabled)
-		return;
+		return -EALREADY;
+
+	if (enabled) {
+		err = __connman_tethering_set_enabled();
+		if (err < 0)
+			return err;
+	} else
+		__connman_tethering_set_disabled();
 
 	technology->tethering = enabled;
-
 	tethering_changed(technology);
 
-	if (enabled)
-		__connman_tethering_set_enabled();
-	else
-		__connman_tethering_set_disabled();
+	return 0;
 }
 
 static int set_tethering(struct connman_technology *technology,
@@ -265,10 +270,8 @@ static int set_tethering(struct connman_technology *technology,
 		if (result == -EINPROGRESS)
 			continue;
 
-		if (err == -EINPROGRESS || err == 0) {
+		if (err == -EINPROGRESS || err == 0)
 			result = err;
-			continue;
-		}
 	}
 
 	return result;
@@ -344,6 +347,15 @@ static struct connman_technology *technology_find(enum connman_service_type type
 	return NULL;
 }
 
+enum connman_service_type connman_technology_get_type
+				(struct connman_technology *technology)
+{
+	if (!technology)
+		return CONNMAN_SERVICE_TYPE_UNKNOWN;
+
+	return technology->type;
+}
+
 bool connman_technology_get_wifi_tethering(const char **ssid,
 							const char **psk)
 {
@@ -380,6 +392,7 @@ static void technology_load(struct connman_technology *technology)
 	gchar *identifier;
 	GError *error = NULL;
 	bool enable, need_saving = false;
+	char *enc;
 
 	DBG("technology %p", technology);
 
@@ -426,14 +439,14 @@ static void technology_load(struct connman_technology *technology)
 	technology->tethering_ident = g_key_file_get_string(keyfile,
 				identifier, "Tethering.Identifier", NULL);
 
-	technology->tethering_passphrase = g_key_file_get_string(keyfile,
+	enc = g_key_file_get_string(keyfile,
 				identifier, "Tethering.Passphrase", NULL);
+	if (enc)
+		technology->tethering_passphrase = g_strcompress(enc);
 done:
 	g_free(identifier);
 
 	g_key_file_free(keyfile);
-
-	return;
 }
 
 bool __connman_technology_get_offlinemode(void)
@@ -444,19 +457,33 @@ bool __connman_technology_get_offlinemode(void)
 static void connman_technology_save_offlinemode(void)
 {
 	GKeyFile *keyfile;
+	GError *error = NULL;
+	bool offlinemode;
 
 	keyfile = __connman_storage_load_global();
-	if (!keyfile)
-		keyfile = g_key_file_new();
 
-	g_key_file_set_boolean(keyfile, "global",
+	if (!keyfile) {
+		keyfile = g_key_file_new();
+		g_key_file_set_boolean(keyfile, "global",
 					"OfflineMode", global_offlinemode);
 
-	__connman_storage_save_global(keyfile);
+		__connman_storage_save_global(keyfile);
+	}
+	else {
+		offlinemode = g_key_file_get_boolean(keyfile, "global",
+						"OfflineMode", &error);
+
+		if (error || offlinemode != global_offlinemode) {
+			g_key_file_set_boolean(keyfile, "global",
+					"OfflineMode", global_offlinemode);
+			if (error)
+				g_clear_error(&error);
+
+			__connman_storage_save_global(keyfile);
+		}
+	}
 
 	g_key_file_free(keyfile);
-
-	return;
 }
 
 static bool connman_technology_load_offlinemode(void)
@@ -601,7 +628,7 @@ static gboolean technology_pending_reply(gpointer user_data)
 	struct connman_technology *technology = user_data;
 	DBusMessage *reply;
 
-	/* Power request timedout, send ETIMEDOUT. */
+	/* Power request timed out, send ETIMEDOUT. */
 	if (technology->pending_reply) {
 		reply = __connman_error_failed(technology->pending_reply, ETIMEDOUT);
 		if (reply)
@@ -768,6 +795,8 @@ static int technology_disable(struct connman_technology *technology)
 
 	if (technology->type == CONNMAN_SERVICE_TYPE_P2P) {
 		technology->enable_persistent = false;
+		__connman_device_stop_scan(CONNMAN_SERVICE_TYPE_P2P);
+		__connman_peer_disconnect_all();
 		return technology_disabled(technology);
 	} else if (technology->type == CONNMAN_SERVICE_TYPE_WIFI) {
 		struct connman_technology *p2p;
@@ -1003,10 +1032,7 @@ void __connman_technology_scan_stopped(struct connman_device *device,
 		if (device == other_device)
 			continue;
 
-		if (__connman_device_get_service_type(other_device) != type)
-			continue;
-
-		if (connman_device_get_scanning(other_device))
+		if (connman_device_get_scanning(other_device, type))
 			count += 1;
 	}
 
@@ -1058,11 +1084,15 @@ static DBusMessage *scan(DBusConnection *conn, DBusMessage *msg, void *data)
 	DBG("technology %p request from %s", technology,
 			dbus_message_get_sender(msg));
 
+	if (technology->type == CONNMAN_SERVICE_TYPE_P2P &&
+				!technology->enabled)
+		return __connman_error_permission_denied(msg);
+
 	dbus_message_ref(msg);
 	technology->scan_pending =
 		g_slist_prepend(technology->scan_pending, msg);
 
-	err = __connman_device_request_scan(technology->type);
+	err = __connman_device_request_scan_full(technology->type);
 	if (err < 0)
 		reply_scan_pending(technology, err);
 
@@ -1453,7 +1483,7 @@ int __connman_technology_add_device(struct connman_device *device)
 		int err = __connman_device_enable(device);
 		/*
 		 * connman_technology_add_device() calls __connman_device_enable()
-		 * but since the device is already enabled, the calls does not
+		 * but since the device is already enabled, the call does not
 		 * propagate through to connman_technology_enabled via
 		 * connman_device_set_powered.
 		 */
@@ -1557,7 +1587,7 @@ int __connman_technology_set_offlinemode(bool offlinemode)
 	 * resuming offlinemode from last saved profile. We need that
 	 * information in rfkill_update, otherwise it falls back on the
 	 * technology's persistent state. Hence we set the offline mode here
-	 * but save it & call the notifier only if its successful.
+	 * but save it & call the notifier only if it is successful.
 	 */
 
 	global_offlinemode = offlinemode;

@@ -28,7 +28,8 @@
 extern "C" {
 #endif
 
-#define VPN_FLAG_NO_TUN	1
+#define VPN_FLAG_NO_TUN     1
+#define VPN_FLAG_NO_DAEMON  2
 
 enum vpn_state {
 	VPN_STATE_UNKNOWN       = 0,
@@ -48,12 +49,16 @@ struct vpn_driver {
 			vpn_provider_connect_cb_t cb, const char *dbus_sender,
 			void *user_data);
 	void (*disconnect) (struct vpn_provider *provider);
+	int (*remove) (struct vpn_provider *provider);
 	int (*error_code) (struct vpn_provider *provider, int exit_code);
 	int (*save) (struct vpn_provider *provider, GKeyFile *keyfile);
 	int (*device_flags) (struct vpn_provider *provider);
+	int (*route_env_parse) (struct vpn_provider *provider, const char *key,
+			int *family, unsigned long *idx,
+			enum vpn_provider_route_type *type);
 };
 
-int vpn_register(const char *name, struct vpn_driver *driver,
+int vpn_register(const char *name, const struct vpn_driver *driver,
 			const char *program);
 void vpn_unregister(const char *provider_name);
 void vpn_died(struct connman_task *task, int exit_code, void *user_data);
