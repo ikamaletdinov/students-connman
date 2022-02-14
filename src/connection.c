@@ -234,6 +234,15 @@ static void set_vpn_routes(struct gateway_data *new_gateway,
 		if (!active_gateway->ipv4_gateway)
 			return;
 
+
+		/*
+		 * If VPN server is on same subnet as we are, skip adding
+		 * route.
+		 */
+		if (connman_inet_compare_subnet(active_gateway->index,
+								gateway))
+			return;
+
 		DBG("active gw %s", active_gateway->ipv4_gateway->gateway);
 
 		if (g_strcmp0(active_gateway->ipv4_gateway->gateway,
@@ -248,6 +257,10 @@ static void set_vpn_routes(struct gateway_data *new_gateway,
 	} else if (type == CONNMAN_IPCONFIG_TYPE_IPV6) {
 
 		if (!active_gateway->ipv6_gateway)
+			return;
+
+		if (connman_inet_compare_ipv6_subnet(active_gateway->index,
+								gateway))
 			return;
 
 		DBG("active gw %s", active_gateway->ipv6_gateway->gateway);
@@ -460,6 +473,7 @@ static void set_default_gateway(struct gateway_data *data,
 							"0.0.0.0") == 0) {
 		if (connman_inet_set_gateway_interface(index) < 0)
 			return;
+		data->ipv4_gateway->active = true;
 		goto done;
 	}
 
@@ -468,6 +482,7 @@ static void set_default_gateway(struct gateway_data *data,
 							"::") == 0) {
 		if (connman_inet_set_ipv6_gateway_interface(index) < 0)
 			return;
+		data->ipv6_gateway->active = true;
 		goto done;
 	}
 
@@ -534,6 +549,7 @@ static void unset_default_gateway(struct gateway_data *data,
 			g_strcmp0(data->ipv4_gateway->gateway,
 							"0.0.0.0") == 0) {
 		connman_inet_clear_gateway_interface(index);
+		data->ipv4_gateway->active = false;
 		return;
 	}
 
@@ -541,6 +557,7 @@ static void unset_default_gateway(struct gateway_data *data,
 			g_strcmp0(data->ipv6_gateway->gateway,
 							"::") == 0) {
 		connman_inet_clear_ipv6_gateway_interface(index);
+		data->ipv6_gateway->active = false;
 		return;
 	}
 
@@ -557,7 +574,7 @@ static struct gateway_data *find_default_gateway(void)
 {
 	struct connman_service *service;
 
-	service = __connman_service_get_default();
+	service = connman_service_get_default();
 	if (!service)
 		return NULL;
 
@@ -954,7 +971,7 @@ void __connman_connection_gateway_remove(struct connman_service *service,
 			data->ipv6_gateway, do_ipv6);
 
 	/* with vpn this will be called after the network was deleted,
-	 * we need to call set_default here because we will not recieve any
+	 * we need to call set_default here because we will not receive any
 	 * gateway delete notification.
 	 * We hit the same issue if remove_gateway() fails.
 	 */
@@ -1008,12 +1025,18 @@ bool __connman_connection_update_gateway(void)
 		}
 	}
 
-	if (updated && default_gateway) {
-		if (default_gateway->ipv4_gateway)
+	/*
+	 * Set default gateway if it has been updated or if it has not been
+	 * set as active yet.
+	 */
+	if (default_gateway) {
+		if (default_gateway->ipv4_gateway &&
+			(updated || !default_gateway->ipv4_gateway->active))
 			set_default_gateway(default_gateway,
 					CONNMAN_IPCONFIG_TYPE_IPV4);
 
-		if (default_gateway->ipv6_gateway)
+		if (default_gateway->ipv6_gateway &&
+			(updated || !default_gateway->ipv6_gateway->active))
 			set_default_gateway(default_gateway,
 					CONNMAN_IPCONFIG_TYPE_IPV6);
 	}
@@ -1038,6 +1061,29 @@ int __connman_connection_get_vpn_index(int phy_index)
 		if (data->ipv6_gateway &&
 				data->ipv6_gateway->vpn_phy_index == phy_index)
 			return data->index;
+	}
+
+	return -1;
+}
+
+int __connman_connection_get_vpn_phy_index(int vpn_index)
+{
+	GHashTableIter iter;
+	gpointer value, key;
+
+	g_hash_table_iter_init(&iter, gateway_hash);
+
+	while (g_hash_table_iter_next(&iter, &key, &value)) {
+		struct gateway_data *data = value;
+
+		if (data->index != vpn_index)
+			continue;
+
+		if (data->ipv4_gateway)
+			return data->ipv4_gateway->vpn_phy_index;
+
+		if (data->ipv6_gateway)
+			return data->ipv6_gateway->vpn_phy_index;
 	}
 
 	return -1;

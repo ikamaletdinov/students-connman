@@ -43,8 +43,6 @@ static GKeyFile *storage_load(const char *pathname)
 	GKeyFile *keyfile = NULL;
 	GError *error = NULL;
 
-	DBG("Loading %s", pathname);
-
 	keyfile = g_key_file_new();
 
 	if (!g_key_file_load_from_file(keyfile, pathname, 0, &error)) {
@@ -159,28 +157,6 @@ GKeyFile *__connman_storage_load_provider_config(const char *ident)
 	keyfile = storage_load(pathname);
 
 	g_free(pathname);
-
-	return keyfile;
-}
-
-GKeyFile *__connman_storage_open_service(const char *service_id)
-{
-	gchar *pathname;
-	GKeyFile *keyfile = NULL;
-
-	pathname = g_strdup_printf("%s/%s/%s", STORAGEDIR, service_id, SETTINGS);
-	if (!pathname)
-		return NULL;
-
-	keyfile =  storage_load(pathname);
-	if (keyfile) {
-		g_free(pathname);
-		return keyfile;
-	}
-
-	g_free(pathname);
-
-	keyfile = g_key_file_new();
 
 	return keyfile;
 }

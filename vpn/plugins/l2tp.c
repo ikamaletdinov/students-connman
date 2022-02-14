@@ -65,6 +65,7 @@ enum {
 	OPT_L2G = 2,
 	OPT_L2	= 3,
 	OPT_PPPD = 4,
+	OPT_L2LNS = 5,
 };
 
 struct {
@@ -83,7 +84,7 @@ struct {
 	{ "L2TP.DefaultRoute", "defaultroute", OPT_L2, NULL, OPT_STRING },
 	{ "L2TP.FlowBit", "flow bit", OPT_L2, NULL, OPT_STRING },
 	{ "L2TP.TunnelRWS", "tunnel rws", OPT_L2, NULL, OPT_STRING },
-	{ "L2TP.Exclusive", "exclusive", OPT_L2, NULL, OPT_STRING },
+	{ "L2TP.Exclusive", "exclusive", OPT_L2LNS, NULL, OPT_STRING },
 	{ "L2TP.Autodial", "autodial", OPT_L2, "yes", OPT_STRING },
 	{ "L2TP.Redial", "redial", OPT_L2, "yes", OPT_STRING },
 	{ "L2TP.RedialTimeout", "redial timeout", OPT_L2, "10", OPT_STRING },
@@ -96,7 +97,7 @@ struct {
 	{ "L2TP.ForceUserSpace", "force userspace", OPT_L2G, NULL, OPT_STRING },
 	{ "L2TP.ListenAddr", "listen-addr", OPT_L2G, NULL, OPT_STRING },
 	{ "L2TP.Rand Source", "rand source", OPT_L2G, NULL, OPT_STRING },
-	{ "L2TP.IPsecSaref", "ipsec saref", OPT_L2G, NULL, OPT_STRING },
+	{ "L2TP.IPsecSaref", "ipsec saref", OPT_L2G, "no", OPT_STRING },
 	{ "L2TP.Port", "port", OPT_L2G, NULL, OPT_STRING },
 	{ "PPPD.EchoFailure", "lcp-echo-failure", OPT_PPPD, "0", OPT_STRING },
 	{ "PPPD.EchoInterval", "lcp-echo-interval", OPT_PPPD, "0", OPT_STRING },
@@ -178,7 +179,8 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 		DBG("authentication failure");
 
 		vpn_provider_set_string(provider, "L2TP.User", NULL);
-		vpn_provider_set_string(provider, "L2TP.Password", NULL);
+		vpn_provider_set_string_hide_value(provider, "L2TP.Password",
+					NULL);
 
 		return VPN_STATE_AUTH_FAILURE;
 	}
@@ -243,6 +245,8 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 	if (addressv4)
 		connman_ipaddress_set_ipv4(ipaddress, addressv4, netmask,
 					gateway);
+
+	connman_ipaddress_set_p2p(ipaddress, true);
 
 	vpn_provider_set_ipaddress(provider, ipaddress);
 	vpn_provider_set_nameservers(provider, nameservers);
@@ -382,6 +386,7 @@ static int write_pppd_option(struct vpn_provider *provider, int fd)
 
 	l2tp_write_option(fd, "nodetach", NULL);
 	l2tp_write_option(fd, "lock", NULL);
+	l2tp_write_option(fd, "logfd", "2");
 	l2tp_write_option(fd, "usepeerdns", NULL);
 	l2tp_write_option(fd, "noipdefault", NULL);
 	l2tp_write_option(fd, "noauth", NULL);
@@ -453,6 +458,9 @@ static int l2tp_write_config(struct vpn_provider *provider,
 	l2tp_write_option(fd, "[global]", NULL);
 	l2tp_write_fields(provider, fd, OPT_L2G);
 
+	l2tp_write_option(fd, "[lns default]", NULL);
+	l2tp_write_fields(provider, fd, OPT_L2LNS);
+
 	l2tp_write_option(fd, "[lac l2tp]", NULL);
 
 	option = vpn_provider_get_string(provider, "Host");
@@ -490,16 +498,28 @@ struct request_input_reply {
 static void request_input_reply(DBusMessage *reply, void *user_data)
 {
 	struct request_input_reply *l2tp_reply = user_data;
+	struct l2tp_private_data *data;
 	const char *error = NULL;
 	char *username = NULL, *password = NULL;
 	char *key;
 	DBusMessageIter iter, dict;
+	int err;
 
 	DBG("provider %p", l2tp_reply->provider);
 
-	if (!reply || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
-		if (reply)
-			error = dbus_message_get_error_name(reply);
+	if (!reply)
+		goto done;
+
+	data = l2tp_reply->user_data;
+
+	err = vpn_agent_check_and_process_reply_error(reply,
+				l2tp_reply->provider, data->task, data->cb,
+				data->user_data);
+	if (err) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		error = dbus_message_get_error_name(reply);
 		goto done;
 	}
 
@@ -592,6 +612,9 @@ static int request_input(struct vpn_provider *provider,
 
 	connman_dbus_dict_open(&iter, &dict);
 
+	if (vpn_provider_get_authentication_errors(provider))
+		vpn_agent_append_auth_failure(&dict, provider, NULL);
+
 	vpn_agent_append_user_info(&dict, provider, "L2TP.User");
 
 	vpn_agent_append_host_and_name(&dict, provider);
@@ -632,7 +655,7 @@ static int run_connect(struct vpn_provider *provider,
 	int l2tp_fd, pppd_fd;
 	int err;
 
-	if (!username || !password) {
+	if (!username || !*username || !password || !*password) {
 		DBG("Cannot connect username %s password %p",
 						username, password);
 		err = -EINVAL;
@@ -703,7 +726,7 @@ static void request_input_cb(struct vpn_provider *provider,
 {
 	struct l2tp_private_data *data = user_data;
 
-	if (!username || !password)
+	if (!username || !*username || !password || !*password)
 		DBG("Requesting username %s or password failed, error %s",
 			username, error);
 	else if (error)
@@ -738,7 +761,7 @@ static int l2tp_connect(struct vpn_provider *provider,
 
 	DBG("user %s password %p", username, password);
 
-	if (!username || !password) {
+	if (!username || !*username || !password || !*password) {
 		struct l2tp_private_data *data;
 
 		data = g_try_new0(struct l2tp_private_data, 1);
@@ -782,7 +805,12 @@ static int l2tp_error_code(struct vpn_provider *provider, int exit_code)
 
 static void l2tp_disconnect(struct vpn_provider *provider)
 {
-	vpn_provider_set_string(provider, "L2TP.Password", NULL);
+	if (!provider)
+		return;
+
+	vpn_provider_set_string_hide_value(provider, "L2TP.Password", NULL);
+
+	connman_agent_cancel(provider);
 }
 
 static struct vpn_driver vpn_driver = {
