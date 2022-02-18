@@ -54,15 +54,18 @@
 enum {
 	OPT_STRING = 1,
 	OPT_BOOL = 2,
+	OPT_PPTP_ONLY = 3,
 };
 
 struct {
 	const char *cm_opt;
 	const char *pptp_opt;
-	const char *vpnc_default;
+	const char *pptp_default;
 	int type;
 } pptp_options[] = {
 	{ "PPTP.User", "user", NULL, OPT_STRING },
+	{ "PPTP.IdleWait", "--idle-wait", NULL, OPT_PPTP_ONLY},
+	{ "PPTP.MaxEchoWait", "--max-echo-wait", NULL, OPT_PPTP_ONLY},
 	{ "PPPD.EchoFailure", "lcp-echo-failure", "0", OPT_STRING },
 	{ "PPPD.EchoInterval", "lcp-echo-interval", "0", OPT_STRING },
 	{ "PPPD.Debug", "debug", NULL, OPT_STRING },
@@ -137,7 +140,8 @@ static int pptp_notify(DBusMessage *msg, struct vpn_provider *provider)
 		DBG("authentication failure");
 
 		vpn_provider_set_string(provider, "PPTP.User", NULL);
-		vpn_provider_set_string(provider, "PPTP.Password", NULL);
+		vpn_provider_set_string_hide_value(provider, "PPTP.Password",
+					NULL);
 
 		return VPN_STATE_AUTH_FAILURE;
 	}
@@ -203,6 +207,7 @@ static int pptp_notify(DBusMessage *msg, struct vpn_provider *provider)
 		connman_ipaddress_set_ipv4(ipaddress, addressv4, netmask,
 					gateway);
 
+	connman_ipaddress_set_p2p(ipaddress, true);
 	vpn_provider_set_ipaddress(provider, ipaddress);
 	vpn_provider_set_nameservers(provider, nameservers);
 
@@ -282,16 +287,28 @@ struct request_input_reply {
 static void request_input_reply(DBusMessage *reply, void *user_data)
 {
 	struct request_input_reply *pptp_reply = user_data;
+	struct pptp_private_data *data;
 	const char *error = NULL;
 	char *username = NULL, *password = NULL;
 	char *key;
 	DBusMessageIter iter, dict;
+	int err;
 
 	DBG("provider %p", pptp_reply->provider);
 
-	if (!reply || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
-		if (reply)
-			error = dbus_message_get_error_name(reply);
+	if (!reply)
+		goto done;
+
+	data = pptp_reply->user_data;
+
+	err = vpn_agent_check_and_process_reply_error(reply,
+				pptp_reply->provider, data->task, data->cb,
+				data->user_data);
+	if (err) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		error = dbus_message_get_error_name(reply);
 		goto done;
 	}
 
@@ -384,6 +401,9 @@ static int request_input(struct vpn_provider *provider,
 
 	connman_dbus_dict_open(&iter, &dict);
 
+	if (vpn_provider_get_authentication_errors(provider))
+		vpn_agent_append_auth_failure(&dict, provider, NULL);
+
 	vpn_agent_append_user_info(&dict, provider, "PPTP.User");
 
 	vpn_agent_append_host_and_name(&dict, provider);
@@ -420,16 +440,11 @@ static int run_connect(struct vpn_provider *provider,
 			vpn_provider_connect_cb_t cb, void *user_data,
 			const char *username, const char *password)
 {
-	const char *opt_s, *host;
+	GString *pptp_opt_s;
+	const char *opt_s;
+	const char *host;
 	char *str;
 	int err, i;
-
-	host = vpn_provider_get_string(provider, "Host");
-	if (!host) {
-		connman_error("Host not set; cannot enable VPN");
-		err = -EINVAL;
-		goto done;
-	}
 
 	if (!username || !password) {
 		DBG("Cannot connect username %s password %p",
@@ -440,19 +455,16 @@ static int run_connect(struct vpn_provider *provider,
 
 	DBG("username %s password %p", username, password);
 
-	str = g_strdup_printf("%s %s --nolaunchpppd --loglevel 2",
-				PPTP, host);
-	if (!str) {
-		connman_error("can not allocate memory");
-		err = -ENOMEM;
-		goto done;
-	}
+	host = vpn_provider_get_string(provider, "Host");
 
-	connman_task_add_argument(task, "pty", str);
-	g_free(str);
+	/* Create PPTP options for pppd "pty" */
+	pptp_opt_s = g_string_new(NULL);
+	g_string_append_printf(pptp_opt_s, "%s %s --nolaunchpppd --loglevel 2",
+				PPTP, host);
 
 	connman_task_add_argument(task, "nodetach", NULL);
 	connman_task_add_argument(task, "lock", NULL);
+	connman_task_add_argument(task, "logfd", "2");
 	connman_task_add_argument(task, "usepeerdns", NULL);
 	connman_task_add_argument(task, "noipdefault", NULL);
 	connman_task_add_argument(task, "noauth", NULL);
@@ -463,7 +475,7 @@ static int run_connect(struct vpn_provider *provider,
 		opt_s = vpn_provider_get_string(provider,
 					pptp_options[i].cm_opt);
 		if (!opt_s)
-			opt_s = pptp_options[i].vpnc_default;
+			opt_s = pptp_options[i].pptp_default;
 
 		if (!opt_s)
 			continue;
@@ -474,7 +486,14 @@ static int run_connect(struct vpn_provider *provider,
 		else if (pptp_options[i].type == OPT_BOOL)
 			pptp_write_bool_option(task,
 					pptp_options[i].pptp_opt, opt_s);
+		else if (pptp_options[i].type == OPT_PPTP_ONLY)
+			g_string_append_printf(pptp_opt_s, " %s %s",
+					pptp_options[i].pptp_opt, opt_s);
 	}
+
+	str = g_string_free(pptp_opt_s, FALSE);
+	connman_task_add_argument(task, "pty", str);
+	g_free(str);
 
 	connman_task_add_argument(task, "plugin",
 				SCRIPTDIR "/libppp-plugin.so");
@@ -593,7 +612,12 @@ static int pptp_error_code(struct vpn_provider *provider, int exit_code)
 
 static void pptp_disconnect(struct vpn_provider *provider)
 {
-	vpn_provider_set_string(provider, "PPTP.Password", NULL);
+	if (!provider)
+		return;
+
+	vpn_provider_set_string_hide_value(provider, "PPTP.Password", NULL);
+
+	connman_agent_cancel(provider);
 }
 
 static struct vpn_driver vpn_driver = {
