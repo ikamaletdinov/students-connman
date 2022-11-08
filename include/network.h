@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <dbus/dbus.h>
+
 #include <connman/device.h>
 #include <connman/ipconfig.h>
 
@@ -55,6 +57,7 @@ enum connman_network_error {
 	CONNMAN_NETWORK_ERROR_CONFIGURE_FAIL  = 2,
 	CONNMAN_NETWORK_ERROR_INVALID_KEY     = 3,
 	CONNMAN_NETWORK_ERROR_CONNECT_FAIL    = 4,
+	CONNMAN_NETWORK_ERROR_BLOCKED         = 5,
 };
 
 #define CONNMAN_NETWORK_PRIORITY_LOW      -100
@@ -99,6 +102,8 @@ void connman_network_set_error(struct connman_network *network,
 int connman_network_set_connected(struct connman_network *network,
 						bool connected);
 bool connman_network_get_connected(struct connman_network *network);
+void connman_network_set_connected_dhcp_later(struct connman_network *network,
+		uint32_t sec);
 
 bool connman_network_get_associating(struct connman_network *network);
 
@@ -127,6 +132,8 @@ uint16_t connman_network_get_frequency(struct connman_network *network);
 int connman_network_set_wifi_channel(struct connman_network *network,
 					uint16_t channel);
 uint16_t connman_network_get_wifi_channel(struct connman_network *network);
+int connman_network_set_autoconnect(struct connman_network *network,
+				bool autoconnect);
 
 int connman_network_set_string(struct connman_network *network,
 					const char *key, const char *value);
@@ -156,10 +163,15 @@ struct connman_network_driver {
 	void (*remove) (struct connman_network *network);
 	int (*connect) (struct connman_network *network);
 	int (*disconnect) (struct connman_network *network);
+	int (*set_autoconnect) (struct connman_network *network,
+				bool autoconnect);
 };
 
 int connman_network_driver_register(struct connman_network_driver *driver);
 void connman_network_driver_unregister(struct connman_network_driver *driver);
+
+void connman_network_append_acddbus(DBusMessageIter *dict,
+		struct connman_network *network);
 
 #ifdef __cplusplus
 }

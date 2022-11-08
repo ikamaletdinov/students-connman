@@ -61,6 +61,7 @@ extern "C" {
 #define G_SUPPLICANT_KEYMGMT_WPA_EAP	(1 << 7)
 #define G_SUPPLICANT_KEYMGMT_WPA_EAP_256	(1 << 8)
 #define G_SUPPLICANT_KEYMGMT_WPS		(1 << 9)
+#define G_SUPPLICANT_KEYMGMT_SAE		(1 << 10)
 
 #define G_SUPPLICANT_PROTO_WPA		(1 << 0)
 #define G_SUPPLICANT_PROTO_RSN		(1 << 1)
@@ -129,6 +130,12 @@ typedef enum {
 	G_SUPPLICANT_PEER_GROUP_FAILED,
 } GSupplicantPeerState;
 
+typedef enum {
+	G_SUPPLICANT_MFP_NONE,
+	G_SUPPLICANT_MFP_OPTIONAL,
+	G_SUPPLICANT_MFP_REQUIRED,
+} GSupplicantMfpOptions;
+
 struct _GSupplicantSSID {
 	const void *ssid;
 	unsigned int ssid_len;
@@ -144,6 +151,10 @@ struct _GSupplicantSSID {
 	const char *identity;
 	const char *anonymous_identity;
 	const char *ca_cert_path;
+	const char *subject_match;
+	const char *altsubject_match;
+	const char *domain_suffix_match;
+	const char *domain_match;
 	const char *client_cert_path;
 	const char *private_key_path;
 	const char *private_key_passphrase;
@@ -151,6 +162,8 @@ struct _GSupplicantSSID {
 	dbus_bool_t use_wps;
 	const char *pin_wps;
 	const char *bgscan;
+	unsigned int keymgmt;
+	GSupplicantMfpOptions ieee80211w;
 };
 
 typedef struct _GSupplicantSSID GSupplicantSSID;
@@ -264,6 +277,9 @@ int g_supplicant_interface_disconnect(GSupplicantInterface *interface,
 					GSupplicantInterfaceCallback callback,
 							void *user_data);
 
+int g_supplicant_interface_set_bss_expiration_age(GSupplicantInterface *interface,
+					unsigned int bss_expiration_age);
+
 int g_supplicant_interface_set_apscan(GSupplicantInterface *interface,
 							unsigned int ap_scan);
 
@@ -332,6 +348,7 @@ bool g_supplicant_peer_is_in_a_group(GSupplicantPeer *peer);
 GSupplicantInterface *g_supplicant_peer_get_group_interface(GSupplicantPeer *peer);
 bool g_supplicant_peer_is_client(GSupplicantPeer *peer);
 bool g_supplicant_peer_has_requested_connection(GSupplicantPeer *peer);
+unsigned int g_supplicant_network_get_keymgmt(GSupplicantNetwork *network);
 
 struct _GSupplicantCallbacks {
 	void (*system_ready) (void);
@@ -347,12 +364,21 @@ struct _GSupplicantCallbacks {
 	void (*network_removed) (GSupplicantNetwork *network);
 	void (*network_changed) (GSupplicantNetwork *network,
 					const char *property);
+	void (*network_associated) (GSupplicantNetwork *network);
+	void (*sta_authorized) (GSupplicantInterface *interface,
+					const char *addr);
+	void (*sta_deauthorized) (GSupplicantInterface *interface,
+					const char *addr);
 	void (*peer_found) (GSupplicantPeer *peer);
 	void (*peer_lost) (GSupplicantPeer *peer);
 	void (*peer_changed) (GSupplicantPeer *peer,
 					GSupplicantPeerState state);
 	void (*peer_request) (GSupplicantPeer *peer);
 	void (*debug) (const char *str);
+	void (*disconnect_reasoncode)(GSupplicantInterface *interface,
+				int reasoncode);
+	void (*assoc_status_code)(GSupplicantInterface *interface,
+				int reasoncode);
 };
 
 typedef struct _GSupplicantCallbacks GSupplicantCallbacks;

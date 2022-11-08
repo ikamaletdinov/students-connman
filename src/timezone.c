@@ -23,7 +23,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -188,7 +187,10 @@ static char *find_origin(void *src_map, struct stat *src_st,
 							subpath, d->d_name);
 
 			if (compare_file(src_map, src_st, pathname) == 0) {
-				str = g_strdup_printf("%s/%s",
+				if (!subpath)
+					str = g_strdup(d->d_name);
+				else
+					str = g_strdup_printf("%s/%s",
 							subpath, d->d_name);
 				closedir(dir);
 				return str;

@@ -11,12 +11,13 @@ include_HEADERS = include/log.h include/plugin.h \
 			include/device.h include/network.h include/inet.h \
 			include/storage.h include/provision.h \
 			include/session.h include/ipaddress.h include/agent.h \
-			include/inotify.h include/peer.h include/machine.h
+			include/inotify.h include/peer.h include/machine.h \
+			include/acd.h include/tethering.h
 
 nodist_include_HEADERS = include/version.h
 
 noinst_HEADERS = include/rtnl.h include/task.h \
-			include/dbus.h include/option.h \
+			include/dbus.h \
 			include/provider.h include/vpn-dbus.h \
 			include/utsname.h include/timeserver.h include/proxy.h \
 			include/technology.h include/setting.h \
@@ -32,8 +33,12 @@ gdbus_libgdbus_internal_la_SOURCES = gdbus/gdbus.h \
 				gdbus/mainloop.c gdbus/watch.c \
 				gdbus/object.c gdbus/client.c gdbus/polkit.c
 
+if BACKTRACE
+backtrace_sources = src/backtrace.c
+endif
+
 gdhcp_sources = gdhcp/gdhcp.h gdhcp/common.h gdhcp/common.c gdhcp/client.c \
-		gdhcp/server.c gdhcp/ipv4ll.h gdhcp/ipv4ll.c gdhcp/unaligned.h
+		gdhcp/server.c gdhcp/unaligned.h
 
 gweb_sources = gweb/gweb.h gweb/gweb.c gweb/gresolv.h gweb/gresolv.c
 
@@ -43,12 +48,14 @@ else
 gweb_sources += gweb/giognutls.h gweb/gionotls.c
 endif
 
-if BACKTRACE
-backtrace_sources = src/backtrace.c
+if STATS
+stats_sources = src/stats.c
+else
+stats_sources = src/nostats.c
 endif
 
 shared_sources = src/shared/util.h src/shared/util.c \
-		src/shared/netlink.h src/shared/netlink.c
+		src/shared/arp.h src/shared/arp.c
 
 if DATAFILES
 
@@ -106,9 +113,9 @@ MANUAL_PAGES =
 
 sbin_PROGRAMS = src/connmand src/connmand-wait-online
 
-src_connmand_SOURCES = $(gdhcp_sources) $(gweb_sources) $(backtrace_sources) \
-			$(builtin_sources) $(shared_sources) src/connman.ver \
-			src/main.c src/connman.h src/log.c \
+src_connmand_SOURCES = $(gdhcp_sources) $(gweb_sources) $(stats_sources) \
+			$(backtrace_sources) $(builtin_sources) $(shared_sources) \
+			src/connman.ver src/main.c src/connman.h src/log.c \
 			src/error.c src/plugin.c src/task.c \
 			src/device.c src/network.c src/connection.c \
 			src/manager.c src/service.c \
@@ -120,13 +127,20 @@ src_connmand_SOURCES = $(gdhcp_sources) $(gweb_sources) $(backtrace_sources) \
 			src/storage.c src/dbus.c src/config.c \
 			src/technology.c src/counter.c src/ntp.c \
 			src/session.c src/tethering.c src/wpad.c src/wispr.c \
-			src/stats.c src/iptables.c src/dnsproxy.c src/6to4.c \
-			src/ippool.c src/bridge.c src/nat.c src/ipaddress.c \
-			src/inotify.c src/firewall.c src/ipv6pd.c src/peer.c \
-			src/peer_service.c src/machine.c src/util.c
+			src/6to4.c src/ippool.c src/bridge.c src/nat.c \
+			src/ipaddress.c src/inotify.c src/ipv6pd.c src/peer.c \
+			src/peer_service.c src/machine.c src/util.c \
+			src/acd.c
+
+if INTERNAL_DNS_BACKEND
+src_connmand_SOURCES += src/dnsproxy.c
+endif
+if SYSTEMD_RESOLVED_DNS_BACKEND
+src_connmand_SOURCES += src/dns-systemd-resolved.c
+endif
 
 src_connmand_LDADD = gdbus/libgdbus-internal.la $(builtin_libadd) \
-			@GLIB_LIBS@ @DBUS_LIBS@ @XTABLES_LIBS@ @GNUTLS_LIBS@ \
+			@GLIB_LIBS@ @DBUS_LIBS@ @GNUTLS_LIBS@ \
 			-lresolv -ldl -lrt
 
 src_connmand_LDFLAGS = -Wl,--export-dynamic \
@@ -136,6 +150,16 @@ src_connmand_wait_online_SOURCES = src/connmand-wait-online.c
 
 src_connmand_wait_online_LDADD = gdbus/libgdbus-internal.la \
 			@GLIB_LIBS@ @DBUS_LIBS@
+
+if XTABLES
+src_connmand_SOURCES += src/iptables.c src/firewall-iptables.c
+src_connmand_LDADD += @XTABLES_LIBS@
+endif
+
+if NFTABLES
+src_connmand_SOURCES += src/firewall-nftables.c
+src_connmand_LDADD += @NFTABLES_LIBS@ @LIBMNL_LIBS@
+endif
 
 if VPN
 vpn_plugin_LTLIBRARIES =
@@ -157,7 +181,7 @@ vpn_connman_vpnd_SOURCES = $(builtin_vpn_sources) $(backtrace_sources) \
 			vpn/vpn-ipconfig.c src/inet.c vpn/vpn-rtnl.c \
 			src/dbus.c src/storage.c src/ipaddress.c src/agent.c \
 			vpn/vpn-agent.c vpn/vpn-agent.h src/inotify.c \
-			vpn/vpn-config.c
+			vpn/vpn-config.c vpn/vpn-settings.c vpn/vpn-util.c
 
 vpn_connman_vpnd_LDADD = gdbus/libgdbus-internal.la $(builtin_vpn_libadd) \
 				@GLIB_LIBS@ @DBUS_LIBS@ @GNUTLS_LIBS@ \
@@ -168,7 +192,11 @@ vpn_connman_vpnd_LDFLAGS = -Wl,--export-dynamic \
 endif
 
 BUILT_SOURCES = $(local_headers) src/builtin.h $(service_files) \
-	scripts/connman scripts/connman_resolvconf.conf
+	scripts/connman
+
+if INTERNAL_DNS_BACKEND
+BUILT_SOURCES += scripts/connman_resolvconf.conf
+endif
 
 if VPN
 BUILT_SOURCES += vpn/builtin.h
@@ -206,7 +234,7 @@ build_vpn_plugindir = $(vpn_plugindir)
 endif
 endif
 
-AM_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ @XTABLES_CFLAGS@ \
+AM_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ \
 				@GNUTLS_CFLAGS@ $(builtin_cflags) \
 				-DCONNMAN_PLUGIN_BUILTIN \
 				-DSTATEDIR=\""$(statedir)"\" \
@@ -223,7 +251,7 @@ else
 AM_CPPFLAGS = -I$(builddir)/include -I$(builddir)/src -I$(srcdir)/gdbus
 endif
 
-src_connmand_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ @XTABLES_CFLAGS@ \
+src_connmand_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ \
 				@GNUTLS_CFLAGS@ $(builtin_cflags) \
 				-DCONNMAN_PLUGIN_BUILTIN \
 				-DSTATEDIR=\""$(statedir)"\" \
@@ -252,6 +280,16 @@ vpn_connman_vpnd_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ \
 
 endif
 
+if XTABLES
+AM_CFLAGS += @XTABLES_CFLAGS@
+src_connmand_CFLAGS += @XTABLES_CFLAGS@
+endif
+
+if NFTABLES
+AM_CFLAGS += @NFTABLES_CFLAGS@ @LIBMNL_CFLAGS@
+src_connmand_CFLAGS += @NFTABLES_CFLAGS@ @LIBMNL_CFLAGS@
+endif
+
 EXTRA_DIST += vpn/vpn-dbus.conf vpn/vpn-polkit.conf
 
 script_DATA =
@@ -269,6 +307,7 @@ client_connmanctl_SOURCES = client/dbus_helpers.h client/dbus_helpers.c \
 			client/input.h client/input.c \
 			client/agent.h client/agent.c \
 			client/peers.h client/peers.c \
+			client/tethering.h client/tethering.c \
 			client/vpnconnections.h client/vpnconnections.c \
 			client/main.c
 
@@ -297,10 +336,10 @@ noinst_PROGRAMS += tools/supplicant-test \
 			tools/dhcp-test tools/dhcp-server-test \
 			tools/addr-test tools/web-test tools/resolv-test \
 			tools/dbus-test tools/polkit-test \
-			tools/iptables-test tools/tap-test tools/wpad-test \
+			tools/tap-test tools/wpad-test \
 			tools/stats-tool tools/private-network-test \
-			tools/session-test tools/iptables-unit \
-			tools/dnsproxy-test tools/netlink-test
+			tools/session-test \
+			tools/dnsproxy-test
 
 tools_supplicant_test_SOURCES = tools/supplicant-test.c \
 			tools/supplicant-dbus.h tools/supplicant-dbus.c \
@@ -319,19 +358,18 @@ tools_wpad_test_LDADD = @GLIB_LIBS@ -lresolv
 
 tools_stats_tool_LDADD = @GLIB_LIBS@
 
-tools_dhcp_test_SOURCES = $(gdhcp_sources) tools/dhcp-test.c
-tools_dhcp_test_LDADD = @GLIB_LIBS@
+tools_dhcp_test_SOURCES = $(backtrace_sources) src/log.c src/util.c \
+		 $(gdhcp_sources) src/inet.c tools/dhcp-test.c src/shared/arp.c
+tools_dhcp_test_LDADD = @GLIB_LIBS@ -ldl
 
-tools_dhcp_server_test_SOURCES = $(gdhcp_sources) tools/dhcp-server-test.c
-tools_dhcp_server_test_LDADD = @GLIB_LIBS@
+tools_dhcp_server_test_SOURCES =  $(backtrace_sources) src/log.c src/util.c \
+		$(gdhcp_sources) src/inet.c tools/dhcp-server-test.c src/shared/arp.c
+tools_dhcp_server_test_LDADD = @GLIB_LIBS@ -ldl
 
 tools_dbus_test_SOURCES = tools/dbus-test.c
 tools_dbus_test_LDADD = gdbus/libgdbus-internal.la @GLIB_LIBS@ @DBUS_LIBS@
 
 tools_polkit_test_LDADD = @DBUS_LIBS@
-
-tools_iptables_test_SOURCES = $(backtrace_sources) src/log.c src/iptables.c tools/iptables-test.c
-tools_iptables_test_LDADD = @GLIB_LIBS@ @XTABLES_LIBS@ -ldl
 
 tools_private_network_test_LDADD = @GLIB_LIBS@ @DBUS_LIBS@
 
@@ -341,18 +379,38 @@ tools_session_test_SOURCES = $(backtrace_sources) src/log.c src/dbus.c src/error
 tools_session_test_LDADD = gdbus/libgdbus-internal.la \
 				@GLIB_LIBS@ @DBUS_LIBS@ -ldl
 
+if XTABLES
+noinst_PROGRAMS += tools/iptables-test tools/ip6tables-test tools/iptables-unit \
+		   unit/test-iptables
+
+tools_iptables_test_SOURCES = $(backtrace_sources) src/log.c src/iptables.c \
+				tools/iptables-test.c
+tools_iptables_test_LDADD = @GLIB_LIBS@ @XTABLES_LIBS@ -ldl
+
+tools_ip6tables_test_SOURCES = $(backtrace_sources) src/log.c src/iptables.c \
+				tools/ip6tables-test.c
+tools_ip6tables_test_LDADD = @GLIB_LIBS@ @XTABLES_LIBS@ -ldl
+
 tools_iptables_unit_CFLAGS = @DBUS_CFLAGS@ @GLIB_CFLAGS@ @XTABLES_CFLAGS@ \
-		-DIPTABLES_SAVE=\""${IPTABLES_SAVE}"\"
+		-DIPTABLES_SAVE=\""${IPTABLES_SAVE}"\" \
+		-DIP6TABLES_SAVE=\""${IP6TABLES_SAVE}"\"
 tools_iptables_unit_SOURCES = $(backtrace_sources) src/log.c \
-		 src/iptables.c src/firewall.c src/nat.c tools/iptables-unit.c
+		src/iptables.c src/firewall-iptables.c src/nat.c \
+		tools/iptables-unit.c
 tools_iptables_unit_LDADD = gdbus/libgdbus-internal.la \
 				@GLIB_LIBS@ @DBUS_LIBS@ @XTABLES_LIBS@ -ldl
 
+TESTS += unit/test-iptables
+
+unit_test_iptables_CFLAGS = $(COVERAGE_OPT) $(AM_CFLAGS) @GLIB_CFLAGS@
+unit_test_iptables_SOURCES = $(backtrace_sources) src/connman.h src/log.c \
+			                                     unit/test-iptables.c src/iptables.c
+unit_test_iptables_LDADD = @GLIB_LIBS@ -ldl
+
+endif
+
 tools_dnsproxy_test_SOURCES = tools/dnsproxy-test.c
 tools_dnsproxy_test_LDADD = @GLIB_LIBS@
-
-tools_netlink_test_SOURCES =$(shared_sources) tools/netlink-test.c
-tools_netlink_test_LDADD = @GLIB_LIBS@
 
 endif
 
@@ -453,6 +511,7 @@ if POLKIT
 else
 	$(AM_V_GEN)cp $(srcdir)/vpn/vpn-dbus.conf $@
 endif
+CLEANFILES += vpn/connman-vpn-dbus.conf
 endif
 
 if SELINUX

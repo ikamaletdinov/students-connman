@@ -206,7 +206,7 @@ static void pan_connect_cb(DBusMessage *message, void *user_data)
 	DBusMessageIter iter;
 
 	pan = g_hash_table_lookup(networks, path);
-	if (!pan) {
+	if (!pan || !pan->network) {
 		DBG("network already removed");
 		return;
 	}
@@ -218,6 +218,7 @@ static void pan_connect_cb(DBusMessage *message, void *user_data)
 
 		if (strcmp(dbus_error,
 				"org.bluez.Error.AlreadyConnected") != 0) {
+			connman_network_set_associating(pan->network, false);
 			connman_network_set_error(pan->network,
 				CONNMAN_NETWORK_ERROR_ASSOCIATE_FAIL);
 			return;
@@ -272,7 +273,7 @@ static void pan_disconnect_cb(DBusMessage *message, void *user_data)
 	struct bluetooth_pan *pan;
 
 	pan = g_hash_table_lookup(networks, path);
-	if (!pan) {
+	if (!pan || !pan->network) {
 		DBG("network already removed");
 		return;
 	}
@@ -716,8 +717,6 @@ static bool tethering_create(const char *path,
 	const char *method;
 	bool result;
 
-	DBG("path %s bridge %s", path, bridge);
-
 	if (!bridge) {
 		g_free(tethering);
 		return false;
@@ -728,6 +727,8 @@ static bool tethering_create(const char *path,
 		g_free(tethering);
 		return false;
 	}
+
+	DBG("path %s bridge %s", path, bridge);
 
 	tethering->technology = technology;
 	tethering->bridge = g_strdup(bridge);
@@ -881,7 +882,6 @@ static void bluetooth_tech_remove(struct connman_technology *technology)
 }
 
 static int bluetooth_tech_set_tethering(struct connman_technology *technology,
-		const char *identifier, const char *passphrase,
 		const char *bridge, bool enabled)
 {
 	GHashTableIter hash_iter;

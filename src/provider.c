@@ -53,6 +53,7 @@ void __connman_provider_append_properties(struct connman_provider *provider,
 							DBusMessageIter *iter)
 {
 	const char *host, *domain, *type;
+	dbus_bool_t split_routing;
 
 	if (!provider->driver || !provider->driver->get_property)
 		return;
@@ -72,6 +73,12 @@ void __connman_provider_append_properties(struct connman_provider *provider,
 	if (type)
 		connman_dbus_dict_append_basic(iter, "Type", DBUS_TYPE_STRING,
 						 &type);
+
+	if (provider->vpn_service) {
+		split_routing = connman_provider_is_split_routing(provider);
+		connman_dbus_dict_append_basic(iter, "SplitRouting",
+					DBUS_TYPE_BOOLEAN, &split_routing);
+	}
 }
 
 struct connman_provider *
@@ -141,12 +148,8 @@ int connman_provider_disconnect(struct connman_provider *provider)
 		provider_indicate_state(provider,
 					CONNMAN_SERVICE_STATE_DISCONNECT);
 
-	if (err < 0) {
-		if (err != -EINPROGRESS)
-			return err;
-
-		return -EINPROGRESS;
-	}
+	if (err < 0)
+		return err;
 
 	if (provider->vpn_service)
 		provider_indicate_state(provider,
@@ -180,17 +183,24 @@ int __connman_provider_connect(struct connman_provider *provider,
 	else
 		return -EOPNOTSUPP;
 
-	if (err < 0) {
-		if (err != -EINPROGRESS)
-			return err;
+	switch (err) {
+	case 0:
+		return 0;
 
+	case -EINPROGRESS:
 		provider_indicate_state(provider,
 					CONNMAN_SERVICE_STATE_ASSOCIATION);
-
+		/* fall through */
+	/*
+	 * Return EINPROGRESS also for when there is an existing pending call.
+	 * The state should not be indicated again but the real state is
+	 * still in progress for the provider.
+	 */
+	case -EALREADY:
 		return -EINPROGRESS;
 	}
 
-	return 0;
+	return err;
 }
 
 int __connman_provider_remove_by_path(const char *path)
@@ -432,6 +442,15 @@ const char *__connman_provider_get_ident(struct connman_provider *provider)
 	return provider->identifier;
 }
 
+const char * __connman_provider_get_transport_ident(
+					struct connman_provider *provider)
+{
+	if (provider && provider && provider->driver && provider->driver->get_property)
+		return provider->driver->get_property(provider, "Transport");
+
+	return NULL;
+}
+
 int connman_provider_set_string(struct connman_provider *provider,
 					const char *key, const char *value)
 {
@@ -489,7 +508,7 @@ void connman_provider_set_index(struct connman_provider *provider, int index)
 
 		ipconfig = __connman_service_get_ip4config(service);
 		if (!ipconfig) {
-			DBG("Couldnt create ipconfig");
+			DBG("Couldn't create ipconfig");
 			goto done;
 		}
 	}
@@ -504,7 +523,7 @@ void connman_provider_set_index(struct connman_provider *provider, int index)
 
 		ipconfig = __connman_service_get_ip6config(service);
 		if (!ipconfig) {
-			DBG("Couldnt create ipconfig for IPv6");
+			DBG("Couldn't create ipconfig for IPv6");
 			goto done;
 		}
 	}
@@ -581,6 +600,111 @@ int connman_provider_set_nameservers(struct connman_provider *provider,
 						nameservers[i], false);
 
 	return 0;
+}
+
+void connman_provider_set_autoconnect(struct connman_provider *provider,
+								bool flag)
+{
+	if (!provider || !provider->vpn_service)
+		return;
+
+	/* Save VPN service if autoconnect value changes */
+	if (connman_service_set_autoconnect(provider->vpn_service, flag))
+		__connman_service_save(provider->vpn_service);
+}
+
+bool connman_provider_is_split_routing(struct connman_provider *provider)
+{
+	if (!provider || !provider->vpn_service)
+		return false;
+
+	return __connman_service_is_split_routing(provider->vpn_service);
+}
+
+int connman_provider_set_split_routing(struct connman_provider *provider,
+							bool split_routing)
+{
+	struct connman_service *service;
+	enum connman_ipconfig_type type;
+	int service_index;
+	int vpn_index;
+	bool service_split_routing;
+	int err = 0;
+
+	DBG("");
+
+	if (!provider || !provider->vpn_service)
+		return -EINVAL;
+
+	service_split_routing = __connman_service_is_split_routing(
+				provider->vpn_service);
+
+	if (service_split_routing == split_routing) {
+		DBG("split_routing already set %s",
+					split_routing ? "true" : "false");
+		return -EALREADY;
+	}
+
+	switch (provider->family) {
+	case AF_INET:
+		type = CONNMAN_IPCONFIG_TYPE_IPV4;
+		break;
+	case AF_INET6:
+		type = CONNMAN_IPCONFIG_TYPE_IPV6;
+		break;
+	case AF_UNSPEC:
+		type = CONNMAN_IPCONFIG_TYPE_ALL;
+		break;
+	default:
+		type = CONNMAN_IPCONFIG_TYPE_UNKNOWN;
+	}
+
+	if (!__connman_service_is_connected_state(provider->vpn_service,
+								type)) {
+		DBG("%p VPN not connected", provider->vpn_service);
+		goto save;
+	}
+
+	vpn_index = __connman_service_get_index(provider->vpn_service);
+	service_index = __connman_connection_get_vpn_phy_index(vpn_index);
+	service = __connman_service_lookup_from_index(service_index);
+	if (!service)
+		goto save;
+
+	if (split_routing)
+		err = __connman_service_move(service, provider->vpn_service,
+					true);
+	else
+		err = __connman_service_move(provider->vpn_service, service,
+					true);
+
+	if (err) {
+		connman_warn("cannot move service %p and VPN %p error %d",
+					service, provider->vpn_service, err);
+
+		/*
+		 * In case of error notify vpnd about the current split routing
+		 * state.
+		 */
+		__connman_service_split_routing_changed(provider->vpn_service);
+		goto out;
+	}
+
+save:
+	__connman_service_set_split_routing(provider->vpn_service,
+								split_routing);
+	__connman_service_save(provider->vpn_service);
+
+out:
+	return err;
+}
+
+int connman_provider_get_family(struct connman_provider *provider)
+{
+	if (!provider)
+		return AF_UNSPEC;
+
+	return provider->family;
 }
 
 static void unregister_provider(gpointer data)
@@ -736,7 +860,7 @@ static void provider_service_changed(struct connman_service *service,
 	vpn_index = __connman_connection_get_vpn_index(service_index);
 
 	DBG("service %p %s state %d index %d/%d", service,
-		__connman_service_get_ident(service),
+		connman_service_get_identifier(service),
 		state, service_index, vpn_index);
 
 	if (vpn_index < 0)
@@ -749,11 +873,9 @@ static void provider_service_changed(struct connman_service *service,
 	DBG("disconnect %p index %d", provider, vpn_index);
 
 	connman_provider_disconnect(provider);
-
-	return;
 }
 
-static struct connman_notifier provider_notifier = {
+static const struct connman_notifier provider_notifier = {
 	.name			= "provider",
 	.offline_mode		= provider_offline_mode,
 	.service_state_changed	= provider_service_changed,

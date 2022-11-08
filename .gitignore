@@ -26,6 +26,8 @@ autom4te.cache
 test-driver
 m4/
 !m4/configmake.m4
+TAGS
+cscope.*
 
 connman.pc
 include/connman
@@ -40,7 +42,7 @@ src/connman-wait-online.service
 src/connmand-wait-online
 plugins/connman.policy
 scripts/connman
-scripts/openconnect-script
+scripts/vpn-script
 scripts/openvpn-script
 scripts/connman_resolvconf.conf
 client/connmanctl
@@ -65,6 +67,7 @@ tools/session-test
 tools/netlink-test
 unit/test-ippool
 unit/test-nat
+unit/test-iptables
 
 doc/*.bak
 doc/*.stamp
