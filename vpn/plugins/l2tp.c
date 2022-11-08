@@ -4,6 +4,7 @@
  *
  *  Copyright (C) 2010,2013  BMW Car IT GmbH.
  *  Copyright (C) 2012-2013  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2019-2021  Jolla Ltd.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2 as
@@ -65,6 +66,7 @@ enum {
 	OPT_L2G = 2,
 	OPT_L2	= 3,
 	OPT_PPPD = 4,
+	OPT_L2LNS = 5,
 };
 
 struct {
@@ -83,7 +85,7 @@ struct {
 	{ "L2TP.DefaultRoute", "defaultroute", OPT_L2, NULL, OPT_STRING },
 	{ "L2TP.FlowBit", "flow bit", OPT_L2, NULL, OPT_STRING },
 	{ "L2TP.TunnelRWS", "tunnel rws", OPT_L2, NULL, OPT_STRING },
-	{ "L2TP.Exclusive", "exclusive", OPT_L2, NULL, OPT_STRING },
+	{ "L2TP.Exclusive", "exclusive", OPT_L2LNS, NULL, OPT_STRING },
 	{ "L2TP.Autodial", "autodial", OPT_L2, "yes", OPT_STRING },
 	{ "L2TP.Redial", "redial", OPT_L2, "yes", OPT_STRING },
 	{ "L2TP.RedialTimeout", "redial timeout", OPT_L2, "10", OPT_STRING },
@@ -96,7 +98,7 @@ struct {
 	{ "L2TP.ForceUserSpace", "force userspace", OPT_L2G, NULL, OPT_STRING },
 	{ "L2TP.ListenAddr", "listen-addr", OPT_L2G, NULL, OPT_STRING },
 	{ "L2TP.Rand Source", "rand source", OPT_L2G, NULL, OPT_STRING },
-	{ "L2TP.IPsecSaref", "ipsec saref", OPT_L2G, NULL, OPT_STRING },
+	{ "L2TP.IPsecSaref", "ipsec saref", OPT_L2G, "no", OPT_STRING },
 	{ "L2TP.Port", "port", OPT_L2G, NULL, OPT_STRING },
 	{ "PPPD.EchoFailure", "lcp-echo-failure", OPT_PPPD, "0", OPT_STRING },
 	{ "PPPD.EchoInterval", "lcp-echo-interval", OPT_PPPD, "0", OPT_STRING },
@@ -120,11 +122,39 @@ struct {
 static DBusConnection *connection;
 
 struct l2tp_private_data {
+	struct vpn_provider *provider;
 	struct connman_task *task;
 	char *if_name;
 	vpn_provider_connect_cb_t cb;
 	void *user_data;
 };
+
+static void l2tp_connect_done(struct l2tp_private_data *data, int err)
+{
+	vpn_provider_connect_cb_t cb;
+	void *user_data;
+
+	if (!data || !data->cb)
+		return;
+
+	/* Ensure that callback is called only once */
+	cb = data->cb;
+	user_data = data->user_data;
+	data->cb = NULL;
+	data->user_data = NULL;
+	cb(data->provider, user_data, err);
+}
+
+static void free_private_data(struct l2tp_private_data *data)
+{
+	if (vpn_provider_get_plugin_data(data->provider) == data)
+		vpn_provider_set_plugin_data(data->provider, NULL);
+
+	l2tp_connect_done(data, EIO);
+	vpn_provider_unref(data->provider);
+	g_free(data->if_name);
+	g_free(data);
+}
 
 static DBusMessage *l2tp_get_sec(struct connman_task *task,
 			DBusMessage *msg, void *user_data)
@@ -163,6 +193,9 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 	char *addressv4 = NULL, *netmask = NULL, *gateway = NULL;
 	char *ifname = NULL, *nameservers = NULL;
 	struct connman_ipaddress *ipaddress = NULL;
+	struct l2tp_private_data *data;
+
+	data = vpn_provider_get_plugin_data(provider);
 
 	dbus_message_iter_init(msg, &iter);
 
@@ -178,13 +211,25 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 		DBG("authentication failure");
 
 		vpn_provider_set_string(provider, "L2TP.User", NULL);
-		vpn_provider_set_string(provider, "L2TP.Password", NULL);
+		vpn_provider_set_string_hide_value(provider, "L2TP.Password",
+					NULL);
 
+		l2tp_connect_done(data, EACCES);
 		return VPN_STATE_AUTH_FAILURE;
 	}
 
-	if (strcmp(reason, "connect"))
+	if (strcmp(reason, "connect")) {
+		l2tp_connect_done(data, EIO);
+
+		/*
+		 * Stop the task to avoid potential looping of this state when
+		 * authentication fails.
+		 */
+		if (data && data->task)
+			connman_task_stop(data->task);
+
 		return VPN_STATE_DISCONNECT;
+	}
 
 	dbus_message_iter_recurse(&iter, &dict);
 
@@ -244,6 +289,8 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 		connman_ipaddress_set_ipv4(ipaddress, addressv4, netmask,
 					gateway);
 
+	connman_ipaddress_set_p2p(ipaddress, true);
+
 	vpn_provider_set_ipaddress(provider, ipaddress);
 	vpn_provider_set_nameservers(provider, nameservers);
 
@@ -252,6 +299,8 @@ static int l2tp_notify(DBusMessage *msg, struct vpn_provider *provider)
 	g_free(gateway);
 	g_free(nameservers);
 	connman_ipaddress_free(ipaddress);
+
+	l2tp_connect_done(data, 0);
 
 	return VPN_STATE_CONNECT;
 }
@@ -382,6 +431,7 @@ static int write_pppd_option(struct vpn_provider *provider, int fd)
 
 	l2tp_write_option(fd, "nodetach", NULL);
 	l2tp_write_option(fd, "lock", NULL);
+	l2tp_write_option(fd, "logfd", "2");
 	l2tp_write_option(fd, "usepeerdns", NULL);
 	l2tp_write_option(fd, "noipdefault", NULL);
 	l2tp_write_option(fd, "noauth", NULL);
@@ -453,6 +503,9 @@ static int l2tp_write_config(struct vpn_provider *provider,
 	l2tp_write_option(fd, "[global]", NULL);
 	l2tp_write_fields(provider, fd, OPT_L2G);
 
+	l2tp_write_option(fd, "[lns default]", NULL);
+	l2tp_write_fields(provider, fd, OPT_L2LNS);
+
 	l2tp_write_option(fd, "[lac l2tp]", NULL);
 
 	option = vpn_provider_get_string(provider, "Host");
@@ -468,9 +521,10 @@ static int l2tp_write_config(struct vpn_provider *provider,
 
 static void l2tp_died(struct connman_task *task, int exit_code, void *user_data)
 {
+	struct l2tp_private_data *data = user_data;
 	char *conf_file;
 
-	vpn_died(task, exit_code, user_data);
+	vpn_died(task, exit_code, data->provider);
 
 	conf_file = g_strdup_printf(VPN_STATEDIR "/connman-xl2tpd.conf");
 	unlink(conf_file);
@@ -479,6 +533,8 @@ static void l2tp_died(struct connman_task *task, int exit_code, void *user_data)
 	conf_file = g_strdup_printf(VPN_STATEDIR "/connman-ppp-option.conf");
 	unlink(conf_file);
 	g_free(conf_file);
+
+	free_private_data(data);
 }
 
 struct request_input_reply {
@@ -490,16 +546,28 @@ struct request_input_reply {
 static void request_input_reply(DBusMessage *reply, void *user_data)
 {
 	struct request_input_reply *l2tp_reply = user_data;
+	struct l2tp_private_data *data;
 	const char *error = NULL;
 	char *username = NULL, *password = NULL;
 	char *key;
 	DBusMessageIter iter, dict;
+	int err;
 
 	DBG("provider %p", l2tp_reply->provider);
 
-	if (!reply || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
-		if (reply)
-			error = dbus_message_get_error_name(reply);
+	if (!reply)
+		goto done;
+
+	data = l2tp_reply->user_data;
+
+	err = vpn_agent_check_and_process_reply_error(reply,
+				l2tp_reply->provider, data->task, data->cb,
+				data->user_data);
+	if (err) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		error = dbus_message_get_error_name(reply);
 		goto done;
 	}
 
@@ -592,6 +660,9 @@ static int request_input(struct vpn_provider *provider,
 
 	connman_dbus_dict_open(&iter, &dict);
 
+	if (vpn_provider_get_authentication_errors(provider))
+		vpn_agent_append_auth_failure(&dict, provider, NULL);
+
 	vpn_agent_append_user_info(&dict, provider, "L2TP.User");
 
 	vpn_agent_append_host_and_name(&dict, provider);
@@ -623,16 +694,16 @@ static int request_input(struct vpn_provider *provider,
 	return -EINPROGRESS;
 }
 
-static int run_connect(struct vpn_provider *provider,
-			struct connman_task *task, const char *if_name,
-			vpn_provider_connect_cb_t cb, void *user_data,
+static int run_connect(struct l2tp_private_data *data,
 			const char *username, const char *password)
 {
-	char *l2tp_name, *pppd_name;
+	struct vpn_provider *provider = data->provider;
+	struct connman_task *task = data->task;
+	char *l2tp_name, *ctrl_name, *pppd_name;
 	int l2tp_fd, pppd_fd;
 	int err;
 
-	if (!username || !password) {
+	if (!username || !*username || !password || !*password) {
 		DBG("Cannot connect username %s password %p",
 						username, password);
 		err = -EINVAL;
@@ -651,12 +722,24 @@ static int run_connect(struct vpn_provider *provider,
 		goto done;
 	}
 
-	pppd_name = g_strdup_printf(VPN_STATEDIR "/connman-ppp-option.conf");
+	ctrl_name = g_strconcat(VPN_STATEDIR, "/connman-xl2tpd-control", NULL);
+
+	if (mkfifo(ctrl_name, S_IRUSR|S_IWUSR) != 0 && errno != EEXIST) {
+		connman_error("Error creating xl2tp control pipe");
+		g_free(l2tp_name);
+		g_free(ctrl_name);
+		close(l2tp_fd);
+		err = -EIO;
+		goto done;
+	}
+
+	pppd_name = g_strconcat(VPN_STATEDIR, "/connman-ppp-option.conf", NULL);
 
 	pppd_fd = open(pppd_name, O_RDWR|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
 	if (pppd_fd < 0) {
 		connman_error("Error writing pppd config");
 		g_free(l2tp_name);
+		g_free(ctrl_name);
 		g_free(pppd_name);
 		close(l2tp_fd);
 		err = -EIO;
@@ -668,32 +751,26 @@ static int run_connect(struct vpn_provider *provider,
 	write_pppd_option(provider, pppd_fd);
 
 	connman_task_add_argument(task, "-D", NULL);
+	connman_task_add_argument(task, "-C", ctrl_name);
 	connman_task_add_argument(task, "-c", l2tp_name);
 
 	g_free(l2tp_name);
+	g_free(ctrl_name);
 	g_free(pppd_name);
 	close(l2tp_fd);
 	close(pppd_fd);
 
-	err = connman_task_run(task, l2tp_died, provider,
-				NULL, NULL, NULL);
+	err = connman_task_run(task, l2tp_died, data, NULL, NULL, NULL);
 	if (err < 0) {
 		connman_error("l2tp failed to start");
 		err = -EIO;
-		goto done;
 	}
 
 done:
-	if (cb)
-		cb(provider, user_data, err);
+	if (err)
+		l2tp_connect_done(data, -err);
 
 	return err;
-}
-
-static void free_private_data(struct l2tp_private_data *data)
-{
-	g_free(data->if_name);
-	g_free(data);
 }
 
 static void request_input_cb(struct vpn_provider *provider,
@@ -703,7 +780,7 @@ static void request_input_cb(struct vpn_provider *provider,
 {
 	struct l2tp_private_data *data = user_data;
 
-	if (!username || !password)
+	if (!username || !*username || !password || !*password)
 		DBG("Requesting username %s or password failed, error %s",
 			username, error);
 	else if (error)
@@ -713,10 +790,7 @@ static void request_input_cb(struct vpn_provider *provider,
 	vpn_provider_set_string_hide_value(provider, "L2TP.Password",
 								password);
 
-	run_connect(provider, data->task, data->if_name, data->cb,
-		data->user_data, username, password);
-
-	free_private_data(data);
+	run_connect(data, username, password);
 }
 
 static int l2tp_connect(struct vpn_provider *provider,
@@ -724,8 +798,20 @@ static int l2tp_connect(struct vpn_provider *provider,
 			vpn_provider_connect_cb_t cb, const char *dbus_sender,
 			void *user_data)
 {
+	struct l2tp_private_data *data;
 	const char *username, *password;
 	int err;
+
+	data = g_try_new0(struct l2tp_private_data, 1);
+	if (!data)
+		return -ENOMEM;
+
+	data->provider = vpn_provider_ref(provider);
+	data->task = task;
+	data->if_name = g_strdup(if_name);
+	data->cb = cb;
+	data->user_data = user_data;
+	vpn_provider_set_plugin_data(provider, data);
 
 	if (connman_task_set_notify(task, "getsec",
 					l2tp_get_sec, provider) != 0) {
@@ -738,34 +824,20 @@ static int l2tp_connect(struct vpn_provider *provider,
 
 	DBG("user %s password %p", username, password);
 
-	if (!username || !password) {
-		struct l2tp_private_data *data;
-
-		data = g_try_new0(struct l2tp_private_data, 1);
-		if (!data)
-			return -ENOMEM;
-
-		data->task = task;
-		data->if_name = g_strdup(if_name);
-		data->cb = cb;
-		data->user_data = user_data;
-
+	if (!username || !*username || !password || !*password) {
 		err = request_input(provider, request_input_cb, dbus_sender,
 									data);
-		if (err != -EINPROGRESS) {
-			free_private_data(data);
-			goto done;
-		}
+		if (err != -EINPROGRESS)
+			goto error;
+
 		return err;
 	}
 
-done:
-	return run_connect(provider, task, if_name, cb, user_data,
-							username, password);
+	return run_connect(data, username, password);
 
 error:
-	if (cb)
-		cb(provider, user_data, err);
+	l2tp_connect_done(data, -err);
+	free_private_data(data);
 
 	return err;
 }
@@ -782,7 +854,12 @@ static int l2tp_error_code(struct vpn_provider *provider, int exit_code)
 
 static void l2tp_disconnect(struct vpn_provider *provider)
 {
-	vpn_provider_set_string(provider, "L2TP.Password", NULL);
+	if (!provider)
+		return;
+
+	vpn_provider_set_string_hide_value(provider, "L2TP.Password", NULL);
+
+	connman_agent_cancel(provider);
 }
 
 static struct vpn_driver vpn_driver = {

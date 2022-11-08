@@ -39,8 +39,21 @@
 
 #include "connman.h"
 
+#define CONF_ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]) - 1)
+
 #define DEFAULT_INPUT_REQUEST_TIMEOUT (120 * 1000)
 #define DEFAULT_BROWSER_LAUNCH_TIMEOUT (300 * 1000)
+
+#define DEFAULT_ONLINE_CHECK_IPV4_URL "http://ipv4.connman.net/online/status.html"
+#define DEFAULT_ONLINE_CHECK_IPV6_URL "http://ipv6.connman.net/online/status.html"
+
+/*
+ * We set the integer to 1 sec so that we have a chance to get
+ * necessary IPv6 router advertisement messages that might have
+ * DNS data etc.
+ */
+#define DEFAULT_ONLINE_CHECK_INITIAL_INTERVAL 1
+#define DEFAULT_ONLINE_CHECK_MAX_INTERVAL 12
 
 #define MAINFILE "main.conf"
 #define CONFIGMAINFILE CONFIGDIR "/" MAINFILE
@@ -49,6 +62,11 @@ static char *default_auto_connect[] = {
 	"wifi",
 	"ethernet",
 	"cellular",
+	NULL
+};
+
+static char *default_favorite_techs[] = {
+	"ethernet",
 	NULL
 };
 
@@ -66,60 +84,112 @@ static struct {
 	bool bg_scan;
 	char **pref_timeservers;
 	unsigned int *auto_connect;
+	unsigned int *favorite_techs;
 	unsigned int *preferred_techs;
+	unsigned int *always_connected_techs;
 	char **fallback_nameservers;
 	unsigned int timeout_inputreq;
 	unsigned int timeout_browserlaunch;
 	char **blacklisted_interfaces;
 	bool allow_hostname_updates;
+	bool allow_domainname_updates;
 	bool single_tech;
 	char **tethering_technologies;
 	bool persistent_tethering_mode;
 	bool enable_6to4;
+	char *vendor_class_id;
+	bool enable_online_check;
+	bool enable_online_to_ready_transition;
+	char *online_check_ipv4_url;
+	char *online_check_ipv6_url;
+	unsigned int online_check_initial_interval;
+	unsigned int online_check_max_interval;
+	bool auto_connect_roaming_services;
+	bool acd;
+	bool use_gateways_as_timeservers;
 } connman_settings  = {
 	.bg_scan = true,
 	.pref_timeservers = NULL,
 	.auto_connect = NULL,
+	.favorite_techs = NULL,
 	.preferred_techs = NULL,
+	.always_connected_techs = NULL,
 	.fallback_nameservers = NULL,
 	.timeout_inputreq = DEFAULT_INPUT_REQUEST_TIMEOUT,
 	.timeout_browserlaunch = DEFAULT_BROWSER_LAUNCH_TIMEOUT,
 	.blacklisted_interfaces = NULL,
 	.allow_hostname_updates = true,
+	.allow_domainname_updates = true,
 	.single_tech = false,
 	.tethering_technologies = NULL,
 	.persistent_tethering_mode = false,
 	.enable_6to4 = false,
+	.vendor_class_id = NULL,
+	.enable_online_check = true,
+	.enable_online_to_ready_transition = false,
+	.online_check_ipv4_url = NULL,
+	.online_check_ipv6_url = NULL,
+	.online_check_initial_interval = DEFAULT_ONLINE_CHECK_INITIAL_INTERVAL,
+	.online_check_max_interval = DEFAULT_ONLINE_CHECK_MAX_INTERVAL,
+	.auto_connect_roaming_services = false,
+	.acd = false,
+	.use_gateways_as_timeservers = false,
 };
 
 #define CONF_BG_SCAN                    "BackgroundScanning"
 #define CONF_PREF_TIMESERVERS           "FallbackTimeservers"
-#define CONF_AUTO_CONNECT               "DefaultAutoConnectTechnologies"
+#define CONF_AUTO_CONNECT_TECHS         "DefaultAutoConnectTechnologies"
+#define CONF_FAVORITE_TECHS             "DefaultFavoriteTechnologies"
+#define CONF_ALWAYS_CONNECTED_TECHS     "AlwaysConnectedTechnologies"
 #define CONF_PREFERRED_TECHS            "PreferredTechnologies"
 #define CONF_FALLBACK_NAMESERVERS       "FallbackNameservers"
 #define CONF_TIMEOUT_INPUTREQ           "InputRequestTimeout"
 #define CONF_TIMEOUT_BROWSERLAUNCH      "BrowserLaunchTimeout"
 #define CONF_BLACKLISTED_INTERFACES     "NetworkInterfaceBlacklist"
 #define CONF_ALLOW_HOSTNAME_UPDATES     "AllowHostnameUpdates"
+#define CONF_ALLOW_DOMAINNAME_UPDATES   "AllowDomainnameUpdates"
 #define CONF_SINGLE_TECH                "SingleConnectedTechnology"
 #define CONF_TETHERING_TECHNOLOGIES      "TetheringTechnologies"
 #define CONF_PERSISTENT_TETHERING_MODE  "PersistentTetheringMode"
 #define CONF_ENABLE_6TO4                "Enable6to4"
+#define CONF_VENDOR_CLASS_ID            "VendorClassID"
+#define CONF_ENABLE_ONLINE_CHECK        "EnableOnlineCheck"
+#define CONF_ENABLE_ONLINE_TO_READY_TRANSITION "EnableOnlineToReadyTransition"
+#define CONF_ONLINE_CHECK_IPV4_URL      "OnlineCheckIPv4URL"
+#define CONF_ONLINE_CHECK_IPV6_URL      "OnlineCheckIPv6URL"
+#define CONF_ONLINE_CHECK_INITIAL_INTERVAL "OnlineCheckInitialInterval"
+#define CONF_ONLINE_CHECK_MAX_INTERVAL     "OnlineCheckMaxInterval"
+#define CONF_AUTO_CONNECT_ROAMING_SERVICES "AutoConnectRoamingServices"
+#define CONF_ACD                        "AddressConflictDetection"
+#define CONF_USE_GATEWAYS_AS_TIMESERVERS "UseGatewaysAsTimeservers"
 
 static const char *supported_options[] = {
 	CONF_BG_SCAN,
 	CONF_PREF_TIMESERVERS,
-	CONF_AUTO_CONNECT,
+	CONF_AUTO_CONNECT_TECHS,
+	CONF_FAVORITE_TECHS,
+	CONF_ALWAYS_CONNECTED_TECHS,
 	CONF_PREFERRED_TECHS,
 	CONF_FALLBACK_NAMESERVERS,
 	CONF_TIMEOUT_INPUTREQ,
 	CONF_TIMEOUT_BROWSERLAUNCH,
 	CONF_BLACKLISTED_INTERFACES,
 	CONF_ALLOW_HOSTNAME_UPDATES,
+	CONF_ALLOW_DOMAINNAME_UPDATES,
 	CONF_SINGLE_TECH,
 	CONF_TETHERING_TECHNOLOGIES,
 	CONF_PERSISTENT_TETHERING_MODE,
 	CONF_ENABLE_6TO4,
+	CONF_VENDOR_CLASS_ID,
+	CONF_ENABLE_ONLINE_CHECK,
+	CONF_ENABLE_ONLINE_TO_READY_TRANSITION,
+	CONF_ONLINE_CHECK_IPV4_URL,
+	CONF_ONLINE_CHECK_IPV6_URL,
+	CONF_ONLINE_CHECK_INITIAL_INTERVAL,
+	CONF_ONLINE_CHECK_MAX_INTERVAL,
+	CONF_AUTO_CONNECT_ROAMING_SERVICES,
+	CONF_ACD,
+	CONF_USE_GATEWAYS_AS_TIMESERVERS,
 	NULL
 };
 
@@ -242,12 +312,15 @@ static void parse_config(GKeyFile *config)
 	char **interfaces;
 	char **str_list;
 	char **tethering;
+	char *string;
 	gsize len;
-	int timeout;
+	int integer;
 
 	if (!config) {
 		connman_settings.auto_connect =
-			parse_service_types(default_auto_connect, 3);
+			parse_service_types(default_auto_connect, CONF_ARRAY_SIZE(default_auto_connect));
+		connman_settings.favorite_techs =
+			parse_service_types(default_favorite_techs, CONF_ARRAY_SIZE(default_favorite_techs));
 		connman_settings.blacklisted_interfaces =
 			g_strdupv(default_blacklist);
 		return;
@@ -270,14 +343,28 @@ static void parse_config(GKeyFile *config)
 	g_clear_error(&error);
 
 	str_list = __connman_config_get_string_list(config, "General",
-			CONF_AUTO_CONNECT, &len, &error);
+			CONF_AUTO_CONNECT_TECHS, &len, &error);
 
 	if (!error)
 		connman_settings.auto_connect =
 			parse_service_types(str_list, len);
 	else
 		connman_settings.auto_connect =
-			parse_service_types(default_auto_connect, 3);
+			parse_service_types(default_auto_connect, CONF_ARRAY_SIZE(default_auto_connect));
+
+	g_strfreev(str_list);
+
+	g_clear_error(&error);
+
+	str_list = __connman_config_get_string_list(config, "General",
+			CONF_FAVORITE_TECHS, &len, &error);
+
+	if (!error)
+		connman_settings.favorite_techs =
+			parse_service_types(str_list, len);
+	else
+		connman_settings.favorite_techs =
+			parse_service_types(default_favorite_techs, CONF_ARRAY_SIZE(default_favorite_techs));
 
 	g_strfreev(str_list);
 
@@ -295,6 +382,17 @@ static void parse_config(GKeyFile *config)
 	g_clear_error(&error);
 
 	str_list = __connman_config_get_string_list(config, "General",
+			CONF_ALWAYS_CONNECTED_TECHS, &len, &error);
+
+	if (!error)
+		connman_settings.always_connected_techs =
+			parse_service_types(str_list, len);
+
+	g_strfreev(str_list);
+
+	g_clear_error(&error);
+
+	str_list = __connman_config_get_string_list(config, "General",
 			CONF_FALLBACK_NAMESERVERS, &len, &error);
 
 	if (!error)
@@ -305,17 +403,17 @@ static void parse_config(GKeyFile *config)
 
 	g_clear_error(&error);
 
-	timeout = g_key_file_get_integer(config, "General",
+	integer = g_key_file_get_integer(config, "General",
 			CONF_TIMEOUT_INPUTREQ, &error);
-	if (!error && timeout >= 0)
-		connman_settings.timeout_inputreq = timeout * 1000;
+	if (!error && integer >= 0)
+		connman_settings.timeout_inputreq = integer * 1000;
 
 	g_clear_error(&error);
 
-	timeout = g_key_file_get_integer(config, "General",
+	integer = g_key_file_get_integer(config, "General",
 			CONF_TIMEOUT_BROWSERLAUNCH, &error);
-	if (!error && timeout >= 0)
-		connman_settings.timeout_browserlaunch = timeout * 1000;
+	if (!error && integer >= 0)
+		connman_settings.timeout_browserlaunch = integer * 1000;
 
 	g_clear_error(&error);
 
@@ -335,6 +433,14 @@ static void parse_config(GKeyFile *config)
 					&error);
 	if (!error)
 		connman_settings.allow_hostname_updates = boolean;
+
+	g_clear_error(&error);
+
+	boolean = __connman_config_get_bool(config, "General",
+					CONF_ALLOW_DOMAINNAME_UPDATES,
+					&error);
+	if (!error)
+		connman_settings.allow_domainname_updates = boolean;
 
 	g_clear_error(&error);
 
@@ -365,6 +471,98 @@ static void parse_config(GKeyFile *config)
 					CONF_ENABLE_6TO4, &error);
 	if (!error)
 		connman_settings.enable_6to4 = boolean;
+
+	g_clear_error(&error);
+
+	string = __connman_config_get_string(config, "General",
+					CONF_VENDOR_CLASS_ID, &error);
+	if (!error)
+		connman_settings.vendor_class_id = string;
+
+	g_clear_error(&error);
+
+	boolean = __connman_config_get_bool(config, "General",
+					CONF_ENABLE_ONLINE_CHECK, &error);
+	if (!error) {
+		connman_settings.enable_online_check = boolean;
+		if (!boolean)
+			connman_info("Online check disabled by main config.");
+	}
+
+	g_clear_error(&error);
+
+	boolean = __connman_config_get_bool(config, "General",
+			CONF_ENABLE_ONLINE_TO_READY_TRANSITION, &error);
+	if (!error) {
+		connman_settings.enable_online_to_ready_transition = boolean;
+	}
+
+	g_clear_error(&error);
+
+	string = __connman_config_get_string(config, "General",
+					CONF_ONLINE_CHECK_IPV4_URL, &error);
+	if (!error)
+		connman_settings.online_check_ipv4_url = string;
+	else
+		connman_settings.online_check_ipv4_url =
+			g_strdup(DEFAULT_ONLINE_CHECK_IPV4_URL);
+
+	g_clear_error(&error);
+
+	string = __connman_config_get_string(config, "General",
+					CONF_ONLINE_CHECK_IPV6_URL, &error);
+	if (!error)
+		connman_settings.online_check_ipv6_url = string;
+	else
+		connman_settings.online_check_ipv6_url =
+			g_strdup(DEFAULT_ONLINE_CHECK_IPV6_URL);
+
+
+	g_clear_error(&error);
+
+	integer = g_key_file_get_integer(config, "General",
+			CONF_ONLINE_CHECK_INITIAL_INTERVAL, &error);
+	if (!error && integer >= 0)
+		connman_settings.online_check_initial_interval = integer;
+
+	g_clear_error(&error);
+
+	integer = g_key_file_get_integer(config, "General",
+			CONF_ONLINE_CHECK_MAX_INTERVAL, &error);
+	if (!error && integer >= 0)
+		connman_settings.online_check_max_interval = integer;
+
+	g_clear_error(&error);
+
+	if (connman_settings.online_check_initial_interval < 1 ||
+		connman_settings.online_check_initial_interval >
+		connman_settings.online_check_max_interval) {
+		connman_warn("Incorrect online check intervals [%u, %u]",
+				connman_settings.online_check_initial_interval,
+				connman_settings.online_check_max_interval);
+		connman_settings.online_check_initial_interval =
+			DEFAULT_ONLINE_CHECK_INITIAL_INTERVAL;
+		connman_settings.online_check_max_interval =
+			DEFAULT_ONLINE_CHECK_MAX_INTERVAL;
+	}
+
+	boolean = __connman_config_get_bool(config, "General",
+				CONF_AUTO_CONNECT_ROAMING_SERVICES, &error);
+	if (!error)
+		connman_settings.auto_connect_roaming_services = boolean;
+
+	g_clear_error(&error);
+
+	boolean = __connman_config_get_bool(config, "General", CONF_ACD, &error);
+	if (!error)
+		connman_settings.acd = boolean;
+
+	g_clear_error(&error);
+
+	boolean = __connman_config_get_bool(config, "General",
+				CONF_USE_GATEWAYS_AS_TIMESERVERS, &error);
+	if (!error)
+		connman_settings.use_gateways_as_timeservers = boolean;
 
 	g_clear_error(&error);
 }
@@ -476,10 +674,34 @@ static gboolean option_version = FALSE;
 static bool parse_debug(const char *key, const char *value,
 					gpointer user_data, GError **error)
 {
-	if (value)
-		option_debug = g_strdup(value);
-	else
+	if (value) {
+		if (option_debug) {
+			char *prev = option_debug;
+
+			option_debug = g_strconcat(prev, ",", value, NULL);
+			g_free(prev);
+		} else {
+			option_debug = g_strdup(value);
+		}
+	} else {
+		g_free(option_debug);
 		option_debug = g_strdup("*");
+	}
+
+	return true;
+}
+
+static bool parse_noplugin(const char *key, const char *value,
+					gpointer user_data, GError **error)
+{
+	if (option_noplugin) {
+		char *prev = option_noplugin;
+
+		option_noplugin = g_strconcat(prev, ",", value, NULL);
+		g_free(prev);
+	} else {
+		option_noplugin = g_strdup(value);
+	}
 
 	return true;
 }
@@ -492,12 +714,12 @@ static GOptionEntry options[] = {
 				G_OPTION_ARG_CALLBACK, parse_debug,
 				"Specify debug options to enable", "DEBUG" },
 	{ "device", 'i', 0, G_OPTION_ARG_STRING, &option_device,
-			"Specify networking device or interface", "DEV" },
+			"Specify networking devices or interfaces", "DEV,..." },
 	{ "nodevice", 'I', 0, G_OPTION_ARG_STRING, &option_nodevice,
-			"Specify networking interface to ignore", "DEV" },
+			"Specify networking interfaces to ignore", "DEV,..." },
 	{ "plugin", 'p', 0, G_OPTION_ARG_STRING, &option_plugin,
 				"Specify plugins to load", "NAME,..." },
-	{ "noplugin", 'P', 0, G_OPTION_ARG_STRING, &option_noplugin,
+	{ "noplugin", 'P', 0, G_OPTION_ARG_CALLBACK, &parse_noplugin,
 				"Specify plugins not to load", "NAME,..." },
 	{ "wifi", 'W', 0, G_OPTION_ARG_STRING, &option_wifi,
 				"Specify driver for WiFi/Supplicant", "NAME" },
@@ -506,7 +728,7 @@ static GOptionEntry options[] = {
 				"Don't fork daemon to background" },
 	{ "nodnsproxy", 'r', G_OPTION_FLAG_REVERSE,
 				G_OPTION_ARG_NONE, &option_dnsproxy,
-				"Don't enable DNS Proxy" },
+				"Don't support DNS resolving" },
 	{ "nobacktrace", 0, G_OPTION_FLAG_REVERSE,
 				G_OPTION_ARG_NONE, &option_backtrace,
 				"Don't print out backtrace information" },
@@ -515,8 +737,17 @@ static GOptionEntry options[] = {
 	{ NULL },
 };
 
-const char *connman_option_get_string(const char *key)
+char *connman_setting_get_string(const char *key)
 {
+	if (g_str_equal(key, CONF_VENDOR_CLASS_ID))
+		return connman_settings.vendor_class_id;
+
+	if (g_str_equal(key, CONF_ONLINE_CHECK_IPV4_URL))
+		return connman_settings.online_check_ipv4_url;
+
+	if (g_str_equal(key, CONF_ONLINE_CHECK_IPV6_URL))
+		return connman_settings.online_check_ipv6_url;
+
 	if (g_strcmp0(key, "wifi") == 0) {
 		if (!option_wifi)
 			return "nl80211,wext";
@@ -535,6 +766,9 @@ bool connman_setting_get_bool(const char *key)
 	if (g_str_equal(key, CONF_ALLOW_HOSTNAME_UPDATES))
 		return connman_settings.allow_hostname_updates;
 
+	if (g_str_equal(key, CONF_ALLOW_DOMAINNAME_UPDATES))
+		return connman_settings.allow_domainname_updates;
+
 	if (g_str_equal(key, CONF_SINGLE_TECH))
 		return connman_settings.single_tech;
 
@@ -544,7 +778,33 @@ bool connman_setting_get_bool(const char *key)
 	if (g_str_equal(key, CONF_ENABLE_6TO4))
 		return connman_settings.enable_6to4;
 
+	if (g_str_equal(key, CONF_ENABLE_ONLINE_CHECK))
+		return connman_settings.enable_online_check;
+
+	if (g_str_equal(key, CONF_ENABLE_ONLINE_TO_READY_TRANSITION))
+		return connman_settings.enable_online_to_ready_transition;
+
+	if (g_str_equal(key, CONF_AUTO_CONNECT_ROAMING_SERVICES))
+		return connman_settings.auto_connect_roaming_services;
+
+	if (g_str_equal(key, CONF_ACD))
+		return connman_settings.acd;
+
+	if (g_str_equal(key, CONF_USE_GATEWAYS_AS_TIMESERVERS))
+		return connman_settings.use_gateways_as_timeservers;
+
 	return false;
+}
+
+unsigned int connman_setting_get_uint(const char *key)
+{
+	if (g_str_equal(key, CONF_ONLINE_CHECK_INITIAL_INTERVAL))
+		return connman_settings.online_check_initial_interval;
+
+	if (g_str_equal(key, CONF_ONLINE_CHECK_MAX_INTERVAL))
+		return connman_settings.online_check_max_interval;
+
+	return 0;
 }
 
 char **connman_setting_get_string_list(const char *key)
@@ -566,11 +826,17 @@ char **connman_setting_get_string_list(const char *key)
 
 unsigned int *connman_setting_get_uint_list(const char *key)
 {
-	if (g_str_equal(key, CONF_AUTO_CONNECT))
+	if (g_str_equal(key, CONF_AUTO_CONNECT_TECHS))
 		return connman_settings.auto_connect;
+
+	if (g_str_equal(key, CONF_FAVORITE_TECHS))
+		return connman_settings.favorite_techs;
 
 	if (g_str_equal(key, CONF_PREFERRED_TECHS))
 		return connman_settings.preferred_techs;
+
+	if (g_str_equal(key, CONF_ALWAYS_CONNECTED_TECHS))
+		return connman_settings.always_connected_techs;
 
 	return NULL;
 }
@@ -669,7 +935,6 @@ int main(int argc, char *argv[])
 	__connman_device_init(option_device, option_nodevice);
 
 	__connman_ippool_init();
-	__connman_iptables_init();
 	__connman_firewall_init();
 	__connman_nat_init();
 	__connman_tethering_init();
@@ -732,7 +997,6 @@ int main(int argc, char *argv[])
 	__connman_tethering_cleanup();
 	__connman_nat_cleanup();
 	__connman_firewall_cleanup();
-	__connman_iptables_cleanup();
 	__connman_peer_service_cleanup();
 	__connman_peer_cleanup();
 	__connman_ippool_cleanup();
@@ -759,10 +1023,14 @@ int main(int argc, char *argv[])
 		g_strfreev(connman_settings.pref_timeservers);
 
 	g_free(connman_settings.auto_connect);
+	g_free(connman_settings.favorite_techs);
 	g_free(connman_settings.preferred_techs);
 	g_strfreev(connman_settings.fallback_nameservers);
 	g_strfreev(connman_settings.blacklisted_interfaces);
 	g_strfreev(connman_settings.tethering_technologies);
+	g_free(connman_settings.vendor_class_id);
+	g_free(connman_settings.online_check_ipv4_url);
+	g_free(connman_settings.online_check_ipv6_url);
 
 	g_free(option_debug);
 	g_free(option_wifi);

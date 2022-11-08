@@ -35,7 +35,7 @@ struct vpn_ipconfig;
 struct connman_ipaddress *__vpn_ipconfig_get_address(struct vpn_ipconfig *ipconfig);
 unsigned short __vpn_ipconfig_get_type_from_index(int index);
 unsigned int __vpn_ipconfig_get_flags_from_index(int index);
-void __vpn_ipconfig_foreach(void (*function) (int index,
+void vpn_ipconfig_foreach(void (*function) (int index,
 				    void *user_data), void *user_data);
 void __vpn_ipconfig_set_local(struct vpn_ipconfig *ipconfig,
 							const char *address);
@@ -85,7 +85,6 @@ int __vpn_provider_create_from_config(GHashTable *settings,
 int __vpn_provider_set_string_immutable(struct vpn_provider *provider,
 					const char *key, const char *value);
 DBusMessage *__vpn_provider_get_connections(DBusMessage *msg);
-const char * __vpn_provider_get_ident(struct vpn_provider *provider);
 struct vpn_provider *__vpn_provider_lookup(const char *identifier);
 int __vpn_provider_indicate_state(struct vpn_provider *provider,
 					enum vpn_provider_state state);
@@ -97,7 +96,7 @@ int __vpn_provider_disconnect(struct vpn_provider *provider);
 int __vpn_provider_remove(const char *path);
 int __vpn_provider_delete(struct vpn_provider *provider);
 void __vpn_provider_cleanup(void);
-int __vpn_provider_init(bool handle_routes);
+int __vpn_provider_init();
 
 #include "vpn-rtnl.h"
 
@@ -112,7 +111,30 @@ int __vpn_rtnl_send(const void *buf, size_t len);
 
 int __vpn_config_init(void);
 void __vpn_config_cleanup(void);
-char *__vpn_config_get_string(GKeyFile *key_file,
-        const char *group_name, const char *key, GError **error);
-char **__vpn_config_get_string_list(GKeyFile *key_file,
-        const char *group_name, const char *key, gsize *length, GError **error);
+char *__vpn_config_get_string(GKeyFile *key_file, const char *group_name,
+					const char *key, GError **error);
+char **__vpn_config_get_string_list(GKeyFile *key_file, const char *group_name,
+			const char *key, gsize *length, GError **error);
+bool __vpn_config_get_boolean(GKeyFile *key_file, const char *group_name,
+			const char *key, bool default_value);
+
+int __vpn_settings_init(const char *file);
+void __vpn_settings_cleanup(void);
+GKeyFile *__vpn_settings_load_config(const char *file);
+unsigned int __vpn_settings_get_timeout_inputreq(void);
+
+struct vpn_plugin_data;
+
+int vpn_settings_parse_vpn_plugin_config(const char* plugin_name);
+void vpn_settings_delete_vpn_plugin_config(const char *name);
+struct vpn_plugin_data* vpn_settings_get_vpn_plugin_config(const char *name);
+
+const char * vpn_settings_get_binary_user(struct vpn_plugin_data *data);
+const char * vpn_settings_get_binary_group(struct vpn_plugin_data *data);
+char ** vpn_settings_get_binary_supplementary_groups(
+	struct vpn_plugin_data *data);
+bool vpn_settings_is_system_user(const char *user);
+
+struct passwd *vpn_util_get_passwd(const char *username);
+struct group *vpn_util_get_group(const char *groupname);
+int vpn_util_create_path(const char *path, uid_t uid, gid_t grp, int mode);

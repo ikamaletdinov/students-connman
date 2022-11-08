@@ -23,7 +23,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -579,7 +578,7 @@ static int tist_init(void)
 
 		err = install_ldisc(install_channel, true);
 		if (err < 0) {
-			connman_error("ldisc installtion failed");
+			connman_error("ldisc installation failed");
 			return err;
 		}
 	}

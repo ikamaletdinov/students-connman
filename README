@@ -11,6 +11,7 @@ The following features are built-in into Connection Manager:
 	- Generic plugin infrastructure
 	- Device and network abstraction (with basic storage support)
 	- IPv4, IPv4-LL (link-local) and DHCP
+	- IPv4 address conflict detection (ACD) according to RFC 5227
 	- IPv6, DHCPv6 and 6to4 tunnels
 	- Advanced routing and DNS configuration
 	- Built-in DNS proxy and intelligent caching
@@ -131,6 +132,15 @@ For a working system, certain configuration options need to be enabled:
 		detected and only a runtime dependency. It is not needed to
 		build ConnMan.
 
+	--enable-iwd
+
+		Enable support for Wireless daemon for Linux
+
+		The IWD project does not have initial release so far,
+		therefore by default IWD support is not enabled.
+
+		It is safe to enable this option along WiFi support.
+
 	--disable-pacrunner
 
 		Disable support for PACrunner proxy handling
@@ -211,6 +221,16 @@ For a working system, certain configuration options need to be enabled:
 			# semodule -i connman-task.pp
 		in order to enable the dbus access.
 
+    --with-dns-backend=TYPE
+
+		Enable support for a DNS resolving backend
+
+		Select a DNS backend to use. Supported values are "internal"
+		and "systemd-resolved". If "internal" is selected, ConnMan
+		will be build with a caching DNS proxy. If "systemd-resolved"
+		is selected, ConnMan configures systemd-resolved to do DNS
+		resolving. The default value is "internal".
+
 
 Activating debugging
 ====================
@@ -258,7 +278,7 @@ If timing conditions are relevant then it is recommended command to
 get log traces as follows:
     connmand -d 2>&1 | ts '[%H:%M:%.S]' | tee connman.log
 
-The 'ts' program is normaly avialable in the moreutils package.
+The 'ts' program is normally available in the moreutils package.
 
 
 Kernel configuration
@@ -318,7 +338,10 @@ If wpa_supplicant is configured to D-Bus autostart, then ConnMan will
 trigger the autostart of wpa_supplicant. However please keep in mind
 that this trigger only happens once. If wpa_supplicant stops or crashes,
 ConnMan does not periodically try to autostart it. It is up to systemd or
-similar service management tool to autostart it.
+similar service management tool to autostart it. In case wpa_supplicant
+is not started by ConnMan then make sure option "-u" is used in order
+to enable its D-Bus control interface and ensure ConnMan can communicate
+with it.
 
 
 VPN
@@ -345,6 +368,31 @@ routes will not be set by ConnMan if the uplink is a cellular
 network. While the same setup works well for a WiFi or ethernet
 uplink.
 
+Up to (at least) version 2.4.5 of OpenVPN getting information about
+private key decryption failures via management channel is missing. This
+will result in attempting with the invalid key over and over as the
+information about failed decryprion is not delivered to OpenVPN plugin.
+The following patch to OpenVPN is required for the private key
+decryption failures to be sent:
+https://git.sailfishos.org/mer-core/openvpn/blob/
+4f4b4af116292a207416c8a990392e35a6fc41af/rpm/privatekey-passphrase-
+handling.diff
+
+GnuTLS
+======
+
+When using GnuTLS be aware that depending on the configuration of
+GnuTLS does either an lazy or eager initialization of an internal
+entropy pool using /dev/urandom. On eager initialization the loading
+of ConnMan will be delayed by the link loader until the entropy pool
+is filled. On smaller system this can easily delay the startup of
+ConnMan by several seconds (we had reports of 25 seconds and more
+delay).
+
+GnuTLS allows to switch back to lazy evaluation when the environment
+variable GNUTLS_NO_EXPLICIT_INIT. For more details please read
+the man page to gnutls_global_init(3).
+
 
 Online check
 ============
@@ -360,11 +408,26 @@ from ipv4.connman.net (for IPv4 connectivity) and ipv6.connman.net
 (for IPv6 connectivity). The used URL looks like this
 http://ipv{4|6}.connman.net/online/status.html
 
+When an online check request fails, another one is triggered after a
+longer interval. The intervals follow the square series of numbers
+in a specific range, by default [1, 12], corresponding to the following
+intervals, in seconds: 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121 and 144.
+
+See connman.conf(5) for the EnableOnlineCheck option, if you need to
+disable the feature.
+It is also possible to specify other URLs via OnlineCheckIPv4URL and
+OnlineCheckIPv6URL options.
+The range of intervals between two online check requests can be fine-tuned
+via OnlineCheckInitialInterval and OnlineCheckMaxInterval options.
+
 During the online check procedure, ConnMan will temporarily install
 a host route to both the ipv4.connman.net and ipv6.connman.net so that
 the online check query can be directed via the correct network
 interface which the connected service is using. This host route is
-automatically removed when the online check is done.
+automatically removed when the online check is done. Note that the server
+expressly does not log any connection information, including IPv4/6
+addresses of connecting clients. The server runtime logs cycle in RAM
+memory depending on amount of connections processed.
 
 ConnMan sends this very minimal information in http header when doing
 the online check request (example):
@@ -373,7 +436,7 @@ the online check request (example):
 	Connection: close
 
 Currently following information is returned from connman.net if
-the connection is successfull (200 OK http response code is returned):
+the connection is successful (200 OK http response code is returned):
 	Server: nginx
 	Date: Mon, 09 Jun 2014 09:25:42 GMT
 	Content-Type: text/html
@@ -390,10 +453,16 @@ Information
 ===========
 
 Mailing list:
-	connman@connman.net
+	connman@lists.linux.dev
 
-For additional information about the project visit ConnMan web site:
-	https://01.org/connman
-	http://www.connman.net
+If you would like to subscribe to receive mail in your inbox, just
+send a (empty) message from your email account to
 
-You can report bugs at https://01.org/jira/browse/CM
+	connman+subscribe@lists.linux.dev
+
+Mailing list archive:
+	https://lore.kernel.org/connman
+
+IRC:
+	ircs://irc.oftc.net:6697/#connman (for SSL)
+	irc://irc.oftc.net:6667/#connman (for non-SSL)

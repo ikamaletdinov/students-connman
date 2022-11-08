@@ -100,6 +100,8 @@ static struct agent_input_data vpnagent_input_handler[] = {
 	  request_input_string_return },
 	{ "OpenConnect.VPNHost", false, "OpenConnect VPN server? ",
 	  request_input_string_return },
+	{ "OpenConnect.SecondPassword", false, "VPN one-time password? ",
+	  request_input_string_return },
 	{ "Username", false, "VPN username? ", request_input_string_return },
 	{ "Password", false, "VPN password? ", request_input_string_return },
 	{ },
@@ -710,8 +712,8 @@ static const GDBusMethodTable agent_methods[] = {
 	{ },
 };
 
-static int agent_register_return(DBusMessageIter *iter, const char *error,
-		void *user_data)
+static int agent_register_return(DBusMessageIter *iter, int errnum,
+				 const char *error, void *user_data)
 {
 	DBusConnection *connection = user_data;
 
@@ -768,8 +770,8 @@ int __connmanctl_agent_register(DBusConnection *connection)
 	return result;
 }
 
-static int agent_unregister_return(DBusMessageIter *iter, const char *error,
-		void *user_data)
+static int agent_unregister_return(DBusMessageIter *iter, int errnum,
+				   const char *error, void *user_data)
 {
 	if (error) {
 		fprintf(stderr, "Error unregistering Agent: %s\n", error);
@@ -819,8 +821,8 @@ static const GDBusMethodTable vpn_agent_methods[] = {
 	{ },
 };
 
-static int vpn_agent_register_return(DBusMessageIter *iter, const char *error,
-		void *user_data)
+static int vpn_agent_register_return(DBusMessageIter *iter, int errnum,
+				     const char *error,	void *user_data)
 {
 	DBusConnection *connection = user_data;
 
@@ -872,7 +874,7 @@ int __connmanctl_vpn_agent_register(DBusConnection *connection)
 	return result;
 }
 
-static int vpn_agent_unregister_return(DBusMessageIter *iter,
+static int vpn_agent_unregister_return(DBusMessageIter *iter, int errnum,
 		const char *error, void *user_data)
 {
 	if (error) {

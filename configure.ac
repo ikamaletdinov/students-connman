@@ -1,5 +1,5 @@
 AC_PREREQ(2.60)
-AC_INIT(connman, 1.32)
+AC_INIT(connman, 1.41)
 
 AC_CONFIG_MACRO_DIR([m4])
 
@@ -20,6 +20,7 @@ AC_SUBST(abs_top_srcdir)
 AC_SUBST(abs_top_builddir)
 
 AC_LANG_C
+AC_USE_SYSTEM_EXTENSIONS
 
 AC_PROG_CC
 AM_PROG_CC_C_O
@@ -81,6 +82,8 @@ if (test "${enable_openconnect}" != "no"); then
 		OPENCONNECT="${path_openconnect}"
 		AC_SUBST(OPENCONNECT)
 	fi
+	PKG_CHECK_MODULES(LIBOPENCONNECT, openconnect >= 8, [],
+		AC_MSG_ERROR(openconnect >= 8 is required))
 fi
 AM_CONDITIONAL(OPENCONNECT, test "${enable_openconnect}" != "no")
 AM_CONDITIONAL(OPENCONNECT_BUILTIN, test "${enable_openconnect}" = "builtin")
@@ -185,6 +188,8 @@ AC_CHECK_LIB(resolv, ns_initparse, dummy=yes, [
 AC_CHECK_HEADERS([execinfo.h])
 AM_CONDITIONAL([BACKTRACE], [test "${ac_cv_header_execinfo_h}" = "yes"])
 
+AC_CHECK_MEMBERS([struct in6_pktinfo.ipi6_addr], [], [], [[#include <netinet/in.h>]])
+
 AC_CHECK_FUNC(signalfd, dummy=yes,
 			AC_MSG_ERROR(signalfd support is required))
 
@@ -218,8 +223,8 @@ fi
 
 AC_DEFINE_UNQUOTED([STATS_MAX_FILE_SIZE], (${stats_max_file_size}), [Maximal size of a statistics round robin file])
 
-PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.28, dummy=yes,
-				AC_MSG_ERROR(GLib >= 2.28 is required))
+PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.40, dummy=yes,
+				AC_MSG_ERROR(GLib >= 2.40 is required))
 AC_SUBST(GLIB_CFLAGS)
 AC_SUBST(GLIB_LIBS)
 
@@ -230,9 +235,9 @@ AC_SUBST(DBUS_LIBS)
 
 AC_ARG_WITH(dbusconfdir, AC_HELP_STRING([--with-dbusconfdir=PATH],
 	[path to D-Bus config directory]), [path_dbusconf=${withval}],
-		[path_dbusconf="`$PKG_CONFIG --variable=sysconfdir dbus-1`"])
+		[path_dbusconf="`$PKG_CONFIG --variable=datadir dbus-1`"])
 if (test -z "${path_dbusconf}"); then
-	DBUS_CONFDIR="${sysconfdir}/dbus-1/system.d"
+	DBUS_CONFDIR="${datadir}/dbus-1/system.d"
 else
 	DBUS_CONFDIR="${path_dbusconf}/dbus-1/system.d"
 fi
@@ -265,10 +270,43 @@ if (test -n "${path_tmpfiles}"); then
 	AC_SUBST(SYSTEMD_TMPFILESDIR)
 fi
 
-PKG_CHECK_MODULES(XTABLES, xtables >= 1.4.11, dummy=yes,
-				AC_MSG_ERROR(Xtables library is required))
-AC_SUBST(XTABLES_CFLAGS)
-AC_SUBST(XTABLES_LIBS)
+AC_ARG_WITH(firewall, AC_HELP_STRING([--with-firewall=TYPE],
+			[specify which firewall type is used iptables or nftables [default=iptables]]),
+		[firewall_type=${withval}],
+		[firewall_type="iptables"])
+
+if (test "${firewall_type}" != "iptables" -a \
+		"${firewall_type}" != "nftables"); then
+	AC_MSG_ERROR(neither nftables nor iptables support enabled)
+fi
+
+found_iptables="no"
+if (test "${firewall_type}" = "iptables"); then
+	PKG_CHECK_MODULES(XTABLES, xtables >= 1.4.11, [found_iptables="yes"],
+			AC_MSG_ERROR(Xtables library is required))
+	AC_SUBST(XTABLES_CFLAGS)
+	AC_SUBST(XTABLES_LIBS)
+fi
+AM_CONDITIONAL(XTABLES, test "${found_iptables}" != "no")
+
+found_libmnl="no"
+if (test "${firewall_type}" = "nftables" -o \
+		"${enable_wireguard}" != "no"); then
+	PKG_CHECK_MODULES(LIBMNL, [libmnl >= 1.0.0], [found_libmnl="yes"],
+		AC_MSG_ERROR([libmnl >= 1.0.0 not found]))
+	AC_SUBST(LIBMNL_CFLAGS)
+	AC_SUBST(LIBMNL_LIBS)
+fi
+AM_CONDITIONAL(LIBMNL, test "${found_libmnl}" != "no")
+
+found_nftables="no"
+if (test "${firewall_type}" = "nftables"); then
+	PKG_CHECK_MODULES(NFTABLES, [libnftnl >= 1.0.4], [found_nftables="yes"],
+		AC_MSG_ERROR([libnftnl >= 1.0.4]))
+	AC_SUBST(NFTABLES_CFLAGS)
+	AC_SUBST(NFTABLES_LIBS)
+fi
+AM_CONDITIONAL(NFTABLES, test "${found_nftables}" != "no")
 
 AC_ARG_ENABLE(test, AC_HELP_STRING([--enable-test],
 		[enable test/example scripts]), [enable_test=${enableval}])
@@ -307,6 +345,12 @@ AC_ARG_ENABLE(ethernet, AC_HELP_STRING([--disable-ethernet],
 					[enable_ethernet=${enableval}])
 AM_CONDITIONAL(ETHERNET, test "${enable_ethernet}" != "no")
 
+AC_ARG_ENABLE(wireguard, AC_HELP_STRING([--disable-wireguard],
+				[disable Wireguard support]),
+					[enable_wireguard=${enableval}])
+AM_CONDITIONAL(WIREGUARD, test "${enable_wireguard}" != "no")
+AM_CONDITIONAL(WIREGUARD_BUILTIN, test "${enable_wireguard}" = "builtin")
+
 AC_ARG_ENABLE(gadget, AC_HELP_STRING([--disable-gadget],
 				[disable USB Gadget support]),
 					[enable_gadget=${enableval}])
@@ -316,6 +360,11 @@ AC_ARG_ENABLE(wifi, AC_HELP_STRING([--disable-wifi],
 				[disable WiFi support]),
 					[enable_wifi=${enableval}])
 AM_CONDITIONAL(WIFI, test "${enable_wifi}" != "no")
+
+AC_ARG_ENABLE(iwd, AC_HELP_STRING([--enable-iwd],
+				[enable iwd support]),
+					[enable_iwd=${enableval}])
+AM_CONDITIONAL(IWD, test "${enable_iwd}" = "yes")
 
 AC_ARG_ENABLE(bluetooth, AC_HELP_STRING([--disable-bluetooth],
 				[disable Bluetooth support]),
@@ -352,14 +401,24 @@ AC_ARG_ENABLE(tools, AC_HELP_STRING([--disable-tools],
 					[enable_tools=${enableval}])
 AM_CONDITIONAL(TOOLS, test "${enable_tools}" != "no")
 
+AC_ARG_ENABLE(stats, AC_HELP_STRING([--disable-stats],
+				[disable statistics round robin file generation]),
+					[enable_stats=${enableval}])
+AM_CONDITIONAL(STATS, test "${enable_stats}" != "no")
+
 if (test "${enable_tools}" != "no"); then
 	AC_PATH_PROGS(IPTABLES_SAVE, [iptables-save], [],
 						$PATH:/sbin:/usr/sbin)
+	AC_PATH_PROGS(IP6TABLES_SAVE, [ip6tables-save], [],
+						$PATH:/sbin:/usr/sbin)
 	IPTABLES_SAVE=$ac_cv_path_IPTABLES_SAVE
+	IP6TABLES_SAVE=$ac_cv_path_IP6TABLES_SAVE
 else
 	IPTABLES_SAVE=""
+	IP6TABLES_SAVE=""
 fi
 AC_SUBST(IPTABLES_SAVE)
+AC_SUBST(IP6TABLES_SAVE)
 
 AC_ARG_ENABLE(client, AC_HELP_STRING([--disable-client],
 				[disable command line client]),
@@ -403,6 +462,21 @@ AM_CONDITIONAL(VPN, test "${enable_openconnect}" != "no" -o \
 			"${enable_openvpn}" != "no" -o \
 			"${enable_vpnc}" != "no" -o \
 			"${enable_l2tp}" != "no" -o \
-			"${enable_pptp}" != "no")
+			"${enable_pptp}" != "no" -o \
+			"${enable_wireguard}" != "no")
+
+AC_MSG_CHECKING(which DNS backend to use)
+AC_ARG_WITH(dns-backend, AC_HELP_STRING([--with-dns-backend=TYPE],
+            [specify which DNS backend to use: internal or systemd-resolved [default=internal]]),
+		[dns_backend=${withval}],
+		[dns_backend="internal"])
+
+if (test "${dns_backend}" != "internal" -a \
+		"${dns_backend}" != "systemd-resolved"); then
+	AC_MSG_ERROR(no suitable DNS backend defined)
+fi
+AM_CONDITIONAL(INTERNAL_DNS_BACKEND, test "${dns_backend}" = "internal")
+AM_CONDITIONAL(SYSTEMD_RESOLVED_DNS_BACKEND, test "${dns_backend}" = "systemd-resolved")
+AC_MSG_RESULT(${dns_backend})
 
 AC_OUTPUT(Makefile include/version.h connman.pc)

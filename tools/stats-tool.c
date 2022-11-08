@@ -22,7 +22,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -109,12 +108,10 @@ static char *option_last_file_name = NULL;
 static bool parse_start_ts(const char *key, const char *value,
 					gpointer user_data, GError **error)
 {
-	GTimeVal time_val;
+	struct tm tm;
 
-	if (!g_time_val_from_iso8601(value, &time_val))
-		return false;
-
-	option_start_ts = time_val.tv_sec;
+	strptime(value, "%FT%TZ", &tm);
+	option_start_ts = mktime(&tm);
 
 	return true;
 }
@@ -794,7 +791,7 @@ static void swap_and_close_files(struct stats_file *history_file,
 	munmap(history_file->addr, history_file->len);
 	munmap(temp_file->addr, temp_file->len);
 
-	TFR(close(temp_file->fd));
+	close(temp_file->fd);
 
 	unlink(history_file->name);
 
@@ -802,7 +799,7 @@ static void swap_and_close_files(struct stats_file *history_file,
 		return;
 
 	unlink(temp_file->name);
-	TFR(close(history_file->fd));
+	close(history_file->fd);
 }
 
 static void history_file_update(struct stats_file *data_file,
