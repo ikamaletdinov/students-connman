@@ -105,20 +105,14 @@ static void clear_timer(struct connman_dhcpv6 *dhcp)
 	}
 }
 
-static inline guint get_random(void)
-{
-	uint64_t val;
-
-	__connman_util_get_random(&val);
-
-	/* Make sure the value is always positive so strip MSB */
-	return ((uint32_t)val) >> 1;
-}
-
 static guint compute_random(guint val)
 {
+	uint64_t rand;
+
+	__connman_util_get_random(&rand);
+
 	return val - val / 10 +
-		(get_random() % (2 * 1000)) * val / 10 / 1000;
+		((guint) rand % (2 * 1000)) * val / 10 / 1000;
 }
 
 /* Calculate a random delay, RFC 3315 chapter 14 */
@@ -202,7 +196,7 @@ static int set_duid(struct connman_service *service,
 	unsigned char *duid;
 	int duid_len;
 
-	ident = __connman_service_get_ident(service);
+	ident = connman_service_get_identifier(service);
 
 	keyfile = connman_storage_load_service(ident);
 	if (!keyfile)
@@ -951,7 +945,7 @@ static void do_dad(GDHCPClient *dhcp_client, struct connman_dhcpv6 *dhcp)
 
 		ref_own_address(user_data);
 
-		if (inet_pton(AF_INET6, address, &addr) < 0) {
+		if (inet_pton(AF_INET6, address, &addr) != 1) {
 			DBG("Invalid IPv6 address %s %d/%s", address,
 				-errno, strerror(errno));
 			goto fail;
@@ -1193,12 +1187,17 @@ static int check_restart(struct connman_dhcpv6 *dhcp)
 
 	g_dhcpv6_client_get_timeouts(dhcp->dhcp_client, NULL, NULL,
 				NULL, &expired);
+
+	/* infinite lifetime for an DHCPv6 address */
+	if (expired == 0xffffffff)
+		return -EISCONN;
+
 	current = time(NULL);
 
 	if (current >= expired) {
 		DBG("expired by %d secs", (int)(current - expired));
 
-		g_timeout_add(0, dhcpv6_restart, dhcp);
+		g_idle_add(dhcpv6_restart, dhcp);
 
 		return -ETIMEDOUT;
 	}
@@ -1457,8 +1456,7 @@ int __connman_dhcpv6_start_renew(struct connman_network *network,
 			/* RFC 3315, chapter 18.1.3, start rebind */
 			DBG("start rebind immediately");
 
-			dhcp->timeout = g_timeout_add_seconds(0, start_rebind,
-							dhcp);
+			dhcp->timeout = g_idle_add(start_rebind, dhcp);
 
 		} else if ((unsigned)current < (unsigned)started + T1) {
 			delta = started + T1 - current;
@@ -2160,7 +2158,7 @@ static int check_pd_restart(struct connman_dhcpv6 *dhcp)
 	if (current > expired) {
 		DBG("expired by %d secs", (int)(current - expired));
 
-		g_timeout_add(0, dhcpv6_restart, dhcp);
+		g_idle_add(dhcpv6_restart, dhcp);
 
 		return -ETIMEDOUT;
 	}

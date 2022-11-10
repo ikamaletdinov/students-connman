@@ -23,7 +23,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -196,7 +195,7 @@ int __connman_rfkill_init(void)
 
 	DBG("");
 
-	fd = open("/dev/rfkill", O_RDWR | O_CLOEXEC);
+	fd = open("/dev/rfkill", O_RDONLY | O_CLOEXEC);
 	if (fd < 0) {
 		connman_error("Failed to open RFKILL control device");
 		return -EIO;

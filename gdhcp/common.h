@@ -19,6 +19,7 @@
  *
  */
 
+#include <config.h>
 #include <netinet/udp.h>
 #include <netinet/ip.h>
 
@@ -170,15 +171,15 @@ static const uint8_t dhcp_option_lengths[] = {
 	[OPTION_U32]	= 4,
 };
 
-/* already defined within netinet/in.h if using GNU compiler */
-#ifndef __USE_GNU
+/* already defined within netinet/in.h if using glibc or musl */
+#ifndef HAVE_STRUCT_IN6_PKTINFO_IPI6_ADDR
 struct in6_pktinfo {
 	struct in6_addr ipi6_addr;  /* src/dst IPv6 address */
 	unsigned int ipi6_ifindex;  /* send/recv interface index */
 };
 #endif
 
-uint8_t *dhcp_get_option(struct dhcp_packet *packet, int code);
+uint8_t *dhcp_get_option(struct dhcp_packet *packet, uint16_t packet_len, int code);
 uint8_t *dhcpv6_get_option(struct dhcpv6_packet *packet, uint16_t pkt_len,
 			int code, uint16_t *option_len, int *option_count);
 uint8_t *dhcpv6_get_sub_option(unsigned char *option, uint16_t max_len,
@@ -209,7 +210,8 @@ int dhcp_send_raw_packet(struct dhcp_packet *dhcp_pkt,
 int dhcpv6_send_packet(int index, struct dhcpv6_packet *dhcp_pkt, int len);
 int dhcp_send_kernel_packet(struct dhcp_packet *dhcp_pkt,
 			uint32_t source_ip, int source_port,
-			uint32_t dest_ip, int dest_port);
+			uint32_t dest_ip, int dest_port,
+			const char *interface);
 int dhcp_l3_socket(int port, const char *interface, int family);
 int dhcp_recv_l3_packet(struct dhcp_packet *packet, int fd);
 int dhcpv6_recv_l3_packet(struct dhcpv6_packet **packet, unsigned char *buf,

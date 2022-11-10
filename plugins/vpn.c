@@ -3,6 +3,7 @@
  *  Connection Manager
  *
  *  Copyright (C) 2012-2013  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2019-2021  Jolla Ltd. All rights reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2 as
@@ -38,6 +39,7 @@
 #include <connman/dbus.h>
 #include <connman/provider.h>
 #include <connman/ipaddress.h>
+#include <connman/notifier.h>
 #include <connman/vpn-dbus.h>
 #include <connman/inet.h>
 #include <gweb/gresolv.h>
@@ -71,8 +73,10 @@ struct connection_data {
 	struct connman_provider *provider;
 	int index;
 	DBusPendingCall *call;
+	DBusPendingCall *disconnect_call;
 	bool connect_pending;
 	struct config_create_data *cb_data;
+	char *service_ident;
 
 	char *state;
 	char *type;
@@ -82,6 +86,7 @@ struct connection_data {
 	char *domain;
 	char **nameservers;
 	bool immutable;
+	bool default_route_set;
 
 	GHashTable *server_routes;
 	GHashTable *user_routes;
@@ -91,6 +96,7 @@ struct connection_data {
 
 	GResolv *resolv;
 	guint resolv_id;
+	guint remove_resolv_id;
 };
 
 static int set_string(struct connman_provider *provider,
@@ -148,6 +154,8 @@ static const char *get_string(struct connman_provider *provider,
 			return data->host_ip[0];
 	} else if (g_str_equal(key, "VPN.Domain"))
 		return data->domain;
+	else if (g_str_equal(key, "Transport"))
+		return data->service_ident;
 
 	return g_hash_table_lookup(data->setting_strings, key);
 }
@@ -168,10 +176,15 @@ static char *get_ident(const char *path)
 
 static void cancel_host_resolv(struct connection_data *data)
 {
-	if (data->resolv_id != 0)
+
+	if (data->remove_resolv_id)
+		g_source_remove(data->remove_resolv_id);
+
+	if (data->resolv && data->resolv_id)
 		g_resolv_cancel_lookup(data->resolv, data->resolv_id);
 
 	data->resolv_id = 0;
+	data->remove_resolv_id = 0;
 
 	g_resolv_unref(data->resolv);
 	data->resolv = NULL;
@@ -203,7 +216,7 @@ static void resolv_result(GResolvResultStatus status,
 	 * We cannot unref the resolver here as resolv struct is manipulated
 	 * by gresolv.c after we return from this callback.
 	 */
-	g_timeout_add_seconds(0, remove_resolv, data);
+	data->remove_resolv_id = g_idle_add(remove_resolv, data);
 
 	data->resolv_id = 0;
 }
@@ -249,12 +262,21 @@ static void free_config_cb_data(struct config_create_data *cb_data)
 	g_free(cb_data);
 }
 
+static bool provider_is_connected(struct connection_data *data)
+{
+	return data && (g_str_equal(data->state, "ready") ||
+			g_str_equal(data->state, "configuration"));
+}
+
 static void set_provider_state(struct connection_data *data)
 {
 	enum connman_provider_state state = CONNMAN_PROVIDER_STATE_UNKNOWN;
+	bool connected;
 	int err = 0;
 
 	DBG("provider %p new state %s", data->provider, data->state);
+
+	connected = provider_is_connected(data);
 
 	if (g_str_equal(data->state, "ready")) {
 		state = CONNMAN_PROVIDER_STATE_READY;
@@ -274,7 +296,7 @@ static void set_provider_state(struct connection_data *data)
 	}
 
 	connman_provider_set_state(data->provider, state);
-	return;
+	goto free;
 
 set:
 	if (data->cb_data)
@@ -285,6 +307,12 @@ set:
 
 	free_config_cb_data(data->cb_data);
 	data->cb_data = NULL;
+
+free:
+	if (!connected) {
+		g_free(data->service_ident);
+		data->service_ident = NULL;
+	}
 }
 
 static int create_provider(struct connection_data *data, void *user_data)
@@ -417,6 +445,7 @@ static int extract_ip(DBusMessageIter *array, int family,
 	}
 
 	connman_ipaddress_set_peer(data->ip, peer);
+	connman_ipaddress_set_p2p(data->ip, true);
 
 	return 0;
 }
@@ -463,6 +492,12 @@ static int errorstr2val(const char *error) {
 	if (g_strcmp0(error, CONNMAN_ERROR_INTERFACE ".AlreadyConnected") == 0)
 		return -EISCONN;
 
+	if (g_strcmp0(error, CONNMAN_ERROR_INTERFACE ".NoCarrier") == 0)
+		return -ENOLINK;
+
+	if (g_strcmp0(error, CONNMAN_ERROR_INTERFACE ".OperationCanceled") == 0)
+		return -ECANCELED;
+
 	return -ECONNREFUSED;
 }
 
@@ -473,30 +508,59 @@ static void connect_reply(DBusPendingCall *call, void *user_data)
 	struct connection_data *data = user_data;
 	struct config_create_data *cb_data = data->cb_data;
 
-	if (!dbus_pending_call_get_completed(call))
+	DBG("");
+
+	if (!dbus_pending_call_get_completed(call)) {
+		connman_warn("vpn connect reply pending call incomplete");
+		goto out;
+	}
+
+	if (call != data->call) {
+		connman_error("invalid call %p to VPN connect_reply data %p "
+					" call %p ", call, data, data->call);
+		dbus_pending_call_unref(call);
 		return;
+	}
 
 	DBG("user_data %p path %s", user_data, cb_data ? cb_data->path : NULL);
 
 	reply = dbus_pending_call_steal_reply(call);
+	if (!reply)
+		goto out;
 
 	dbus_error_init(&error);
 
 	if (dbus_set_error_from_message(&error, reply)) {
 		int err = errorstr2val(error.name);
-		if (err != -EINPROGRESS) {
+
+		switch (err) {
+		case -EINPROGRESS:
+			break;
+		/*
+		 * ECANCELED means that user has canceled authentication
+		 * dialog. That's not really an error, it's part of a normal
+		 * workflow. We also take it as a request to turn autoconnect
+		 * off, in case if it was on.
+		 */
+		case -ECANCELED:
+			DBG("%s connect canceled", data->path);
+			connman_provider_set_autoconnect(data->provider, false);
+			break;
+		case -ENOLINK: /* vpnd reports that connmand is not online. */
+		case -EISCONN:
+		case -ECONNREFUSED:
+		default:
 			connman_error("Connect reply: %s (%s)", error.message,
 								error.name);
-			dbus_error_free(&error);
-
 			DBG("data %p cb_data %p", data, cb_data);
+
 			if (cb_data) {
 				cb_data->callback(cb_data->message, err, NULL);
 				free_config_cb_data(cb_data);
 				data->cb_data = NULL;
 			}
-			goto done;
 		}
+
 		dbus_error_free(&error);
 	}
 
@@ -506,10 +570,13 @@ static void connect_reply(DBusPendingCall *call, void *user_data)
 	 * state.
 	 */
 
-done:
 	dbus_message_unref(reply);
 
-	dbus_pending_call_unref(call);
+out:
+	dbus_pending_call_unref(data->call);
+
+	data->call = NULL;
+	data->connect_pending = false;
 }
 
 static int connect_provider(struct connection_data *data, void *user_data,
@@ -518,24 +585,34 @@ static int connect_provider(struct connection_data *data, void *user_data,
 	DBusPendingCall *call;
 	DBusMessage *message;
 	struct config_create_data *cb_data = user_data;
+	struct connman_service *transport = connman_service_get_default();
 
 	DBG("data %p user %p path %s sender %s", data, cb_data, data->path,
 								dbus_sender);
 
-	data->connect_pending = false;
+	if (!transport) {
+		DBG("no default service, refusing to connect");
+		return -EINVAL;
+	}
 
-#define VPN_CONNECT2 "Connect2"
+	if (data->connect_pending && data->call) {
+		connman_info("connect already pending");
+		return -EALREADY;
+	}
 
 	/* We need to pass original dbus sender to connman-vpnd,
-	 * use a Connect2 method for that.
+	 * use a Connect2 method for that if the original dbus sender is set.
+	 * Connect method requires no parameter, Connect2 requires dbus sender
+	 * name to be set.
 	 */
 	message = dbus_message_new_method_call(VPN_SERVICE, data->path,
 					VPN_CONNECTION_INTERFACE,
-					VPN_CONNECT2);
+					dbus_sender && *dbus_sender ?
+						VPN_CONNECT2 : VPN_CONNECT);
 	if (!message)
 		return -ENOMEM;
 
-	if (dbus_sender)
+	if (dbus_sender && *dbus_sender)
 		dbus_message_append_args(message, DBUS_TYPE_STRING,
 					&dbus_sender, NULL);
 	else
@@ -544,7 +621,8 @@ static int connect_provider(struct connection_data *data, void *user_data,
 	if (!dbus_connection_send_with_reply(connection, message,
 						&call, DBUS_TIMEOUT)) {
 		connman_error("Unable to call %s.%s()",
-			VPN_CONNECTION_INTERFACE, VPN_CONNECT2);
+			VPN_CONNECTION_INTERFACE, dbus_sender && *dbus_sender ?
+						VPN_CONNECT2 : VPN_CONNECT);
 		dbus_message_unref(message);
 		return -EINVAL;
 	}
@@ -554,10 +632,27 @@ static int connect_provider(struct connection_data *data, void *user_data,
 		return -EINVAL;
 	}
 
+	if (data->call) {
+		dbus_pending_call_cancel(data->call);
+		dbus_pending_call_unref(data->call);
+	}
+
+	data->call = call;
+	data->connect_pending = true;
+
 	if (cb_data) {
 		g_free(cb_data->path);
 		cb_data->path = g_strdup(data->path);
 	}
+
+	/*
+	 * This is the service which (most likely) will be used
+	 * as a transport for VPN connection.
+	 */
+	g_free(data->service_ident);
+	data->service_ident =
+		g_strdup(connman_service_get_identifier(transport));
+	DBG("transport %s", data->service_ident);
 
 	dbus_pending_call_set_notify(call, connect_reply, data, NULL);
 
@@ -703,12 +798,16 @@ static void get_connections_reply(DBusPendingCall *call, void *user_data)
 		DBUS_DICT_ENTRY_END_CHAR_AS_STRING
 		DBUS_STRUCT_END_CHAR_AS_STRING;
 
-	if (!dbus_pending_call_get_completed(call))
-		return;
-
 	DBG("");
 
+	if (!dbus_pending_call_get_completed(call)) {
+		connman_warn("get connections reply pending call incomplete");
+		goto out;
+	}
+
 	reply = dbus_pending_call_steal_reply(call);
+	if (!reply)
+		goto out;
 
 	dbus_error_init(&error);
 
@@ -748,6 +847,7 @@ static void get_connections_reply(DBusPendingCall *call, void *user_data)
 done:
 	dbus_message_unref(reply);
 
+out:
 	dbus_pending_call_unref(call);
 }
 
@@ -795,12 +895,16 @@ static void remove_connection_reply(DBusPendingCall *call, void *user_data)
 	DBusMessage *reply;
 	DBusError error;
 
-	if (!dbus_pending_call_get_completed(call))
-		return;
-
 	DBG("");
 
+	if (!dbus_pending_call_get_completed(call)) {
+		connman_warn("remove connection reply pending call incomplete");
+		goto out;
+	}
+
 	reply = dbus_pending_call_steal_reply(call);
+	if (!reply)
+		goto out;
 
 	dbus_error_init(&error);
 
@@ -818,6 +922,7 @@ static void remove_connection_reply(DBusPendingCall *call, void *user_data)
 
 	dbus_message_unref(reply);
 
+out:
 	dbus_pending_call_unref(call);
 }
 
@@ -891,11 +996,9 @@ static int provider_connect(struct connman_provider *provider,
 
 static void disconnect_reply(DBusPendingCall *call, void *user_data)
 {
+	struct connection_data *data = user_data;
 	DBusMessage *reply;
 	DBusError error;
-
-	if (!dbus_pending_call_get_completed(call))
-		return;
 
 	DBG("user %p", user_data);
 
@@ -911,16 +1014,21 @@ static void disconnect_reply(DBusPendingCall *call, void *user_data)
 
 done:
 	dbus_message_unref(reply);
-
 	dbus_pending_call_unref(call);
+	data->disconnect_call = NULL;
 }
 
 static int disconnect_provider(struct connection_data *data)
 {
-	DBusPendingCall *call;
+	bool sent;
 	DBusMessage *message;
 
 	DBG("data %p path %s", data, data->path);
+
+	if (data->disconnect_call) {
+		DBG("already disconnecting");
+		return -EALREADY;
+	}
 
 	message = dbus_message_new_method_call(VPN_SERVICE, data->path,
 					VPN_CONNECTION_INTERFACE,
@@ -928,37 +1036,34 @@ static int disconnect_provider(struct connection_data *data)
 	if (!message)
 		return -ENOMEM;
 
-	if (!dbus_connection_send_with_reply(connection, message,
-						&call, DBUS_TIMEOUT)) {
+	sent = dbus_connection_send_with_reply(connection, message,
+					&data->disconnect_call, DBUS_TIMEOUT);
+	dbus_message_unref(message);
+
+	if (!sent || !data->disconnect_call) {
 		connman_error("Unable to call %s.%s()",
 			VPN_CONNECTION_INTERFACE, VPN_DISCONNECT);
-		dbus_message_unref(message);
 		return -EINVAL;
 	}
 
-	if (!call) {
-		dbus_message_unref(message);
-		return -EINVAL;
-	}
+	dbus_pending_call_set_notify(data->disconnect_call, disconnect_reply,
+								data, NULL);
 
-	dbus_pending_call_set_notify(call, disconnect_reply, NULL, NULL);
-
-	dbus_message_unref(message);
+	data->default_route_set = false;
 
 	connman_provider_set_state(data->provider,
 					CONNMAN_PROVIDER_STATE_DISCONNECT);
-	/*
-	 * We return 0 here instead of -EINPROGRESS because
-	 * __connman_service_disconnect() needs to return something
-	 * to gdbus so that gdbus will not call Disconnect() more
-	 * than once. This way we do not need to pass the dbus reply
-	 * message around the code.
-	 */
-	return 0;
+
+	g_free(data->service_ident);
+	data->service_ident = NULL;
+
+	return -EINPROGRESS;
 }
 
 static int provider_disconnect(struct connman_provider *provider)
 {
+	int err = 0;
+
 	struct connection_data *data;
 
 	DBG("provider %p", provider);
@@ -967,11 +1072,18 @@ static int provider_disconnect(struct connman_provider *provider)
 	if (!data)
 		return -EINVAL;
 
-	if (g_str_equal(data->state, "ready") ||
-			g_str_equal(data->state, "configuration"))
-		return disconnect_provider(data);
+	if (provider_is_connected(data))
+		err = disconnect_provider(data);
 
-	return 0;
+	if (data->call) {
+		dbus_pending_call_cancel(data->call);
+		dbus_pending_call_unref(data->call);
+		data->call = NULL;
+	}
+
+	data->connect_pending = false;
+
+	return err;
 }
 
 static void configuration_create_reply(DBusPendingCall *call, void *user_data)
@@ -985,12 +1097,16 @@ static void configuration_create_reply(DBusPendingCall *call, void *user_data)
 	struct connection_data *data;
 	struct config_create_data *cb_data = user_data;
 
-	if (!dbus_pending_call_get_completed(call))
-		return;
-
 	DBG("user %p", cb_data);
 
+	if (!dbus_pending_call_get_completed(call)) {
+		connman_warn("configuration create reply pending call incomplete");
+		goto out;
+	}
+
 	reply = dbus_pending_call_steal_reply(call);
+	if (!reply)
+		goto out;
 
 	dbus_error_init(&error);
 
@@ -1044,6 +1160,7 @@ static void configuration_create_reply(DBusPendingCall *call, void *user_data)
 done:
 	dbus_message_unref(reply);
 
+out:
 	dbus_pending_call_unref(call);
 }
 
@@ -1391,6 +1508,17 @@ static void set_route(struct connection_data *data, struct vpn_route *route)
 		return;
 	}
 
+	DBG("set route provider %p %s/%s/%s", data->provider,
+						route->network, route->gateway,
+						route->netmask);
+
+	/* Do not add default route for split routed VPNs.*/
+	if (connman_provider_is_split_routing(data->provider) &&
+				connman_inet_is_default_route(route->family,
+					route->network, route->gateway,
+					route->netmask))
+		return;
+
 	if (route->family == AF_INET6) {
 		unsigned char prefix_len = atoi(route->netmask);
 
@@ -1403,6 +1531,126 @@ static void set_route(struct connection_data *data, struct vpn_route *route)
 						route->gateway,
 						route->netmask);
 	}
+
+	if (connman_inet_is_default_route(route->family, route->network,
+					route->gateway, route->netmask))
+		data->default_route_set = true;
+}
+
+static int save_route(GHashTable *routes, int family, const char *network,
+			const char *netmask, const char *gateway);
+
+static int add_network_route(struct connection_data *data)
+{
+	struct vpn_route rt = { 0, };
+	int err;
+
+	if (!data)
+		return -EINVAL;
+
+	rt.family = connman_provider_get_family(data->provider);
+	switch (rt.family) {
+	case PF_INET:
+		err = connman_inet_get_route_addresses(data->index,
+					&rt.network, &rt.netmask, &rt.gateway);
+		break;
+	case PF_INET6:
+		err = connman_inet_ipv6_get_route_addresses(data->index,
+					&rt.network, &rt.netmask, &rt.gateway);
+		break;
+	default:
+		connman_error("invalid protocol family %d", rt.family);
+		return -EINVAL;
+	}
+
+	DBG("network %s gateway %s netmask %s for provider %p",
+						rt.network, rt.gateway, rt.netmask,
+						data->provider);
+
+	if (err) {
+		connman_error("cannot get network/gateway/netmask for %p",
+							data->provider);
+		goto out;
+	}
+
+	err = save_route(data->server_routes, rt.family, rt.network, rt.netmask,
+				rt.gateway);
+	if (err) {
+		connman_warn("failed to add network route for provider"
+					"%p", data->provider);
+		goto out;
+	}
+
+	set_route(data, &rt);
+
+out:
+	g_free(rt.network);
+	g_free(rt.netmask);
+	g_free(rt.gateway);
+
+	return 0;
+}
+
+static bool is_valid_route_table(struct connman_provider *provider,
+							GHashTable *table)
+{
+	GHashTableIter iter;
+	gpointer value, key;
+	struct vpn_route *route;
+	size_t table_size;
+
+	if (!table)
+		return false;
+
+	table_size = g_hash_table_size(table);
+
+	/* Non-split routed may have only the default route */
+	if (table_size > 0 && !connman_provider_is_split_routing(provider))
+		return true;
+
+	/* Split routed has more than the default route */
+	if (table_size > 1)
+		return true;
+
+	/*
+	 * Only one route for split routed VPN, which should not be the
+	 * default route.
+	 */
+	g_hash_table_iter_init(&iter, table);
+	if (!g_hash_table_iter_next(&iter, &key, &value)) /* First and only */
+		return false;
+
+	route = value;
+	if (!route)
+		return false;
+
+	DBG("check route %d %s/%s/%s", route->family, route->network,
+					route->gateway, route->netmask);
+
+	if (!connman_inet_is_default_route(route->family, route->network,
+				route->gateway, route->netmask))
+		return true;
+
+	return false;
+}
+
+static bool check_routes(struct connman_provider *provider)
+{
+	struct connection_data *data;;
+
+	DBG("provider %p", provider);
+
+	data = connman_provider_get_data(provider);
+	if (!data)
+		return false;
+
+	if (is_valid_route_table(provider, data->user_routes))
+		return true;
+
+	if (is_valid_route_table(provider, data->server_routes))
+		return true;
+
+	return false;
 }
 
 static int set_routes(struct connman_provider *provider,
@@ -1434,28 +1682,30 @@ static int set_routes(struct connman_provider *provider,
 			set_route(data, value);
 	}
 
+	/* If non-split routed VPN does not have a default route, add it */
+	if (!connman_provider_is_split_routing(provider) &&
+						!data->default_route_set) {
+		int family = connman_provider_get_family(provider);
+		const char *ipaddr_any = family == AF_INET6 ?
+							"::" : "0.0.0.0";
+		struct vpn_route def_route = {family, (char*) ipaddr_any,
+						(char*) ipaddr_any, NULL};
+
+		set_route(data, &def_route);
+	}
+
+	/* Split routed VPN must have at least one route to the network */
+	if (connman_provider_is_split_routing(provider) &&
+						!check_routes(provider)) {
+		int err = add_network_route(data);
+		if (err) {
+			connman_warn("cannot add network route provider %p",
+								provider);
+			return err;
+		}
+	}
+
 	return 0;
-}
-
-static bool check_routes(struct connman_provider *provider)
-{
-	struct connection_data *data;
-
-	DBG("provider %p", provider);
-
-	data = connman_provider_get_data(provider);
-	if (!data)
-		return false;
-
-	if (data->user_routes &&
-			g_hash_table_size(data->user_routes) > 0)
-		return true;
-
-	if (data->server_routes &&
-			g_hash_table_size(data->server_routes) > 0)
-		return true;
-
-	return false;
 }
 
 static struct connman_provider_driver provider_driver = {
@@ -1476,17 +1726,11 @@ static void destroy_provider(struct connection_data *data)
 {
 	DBG("data %p", data);
 
-	if (g_str_equal(data->state, "ready") ||
-			g_str_equal(data->state, "configuration"))
+	if (provider_is_connected(data))
 		connman_provider_disconnect(data->provider);
 
-	if (data->call)
-		dbus_pending_call_cancel(data->call);
-
 	connman_provider_set_data(data->provider, NULL);
-
 	connman_provider_remove(data->provider);
-
 	data->provider = NULL;
 }
 
@@ -1499,13 +1743,24 @@ static void connection_destroy(gpointer hash_data)
 	if (data->provider)
 		destroy_provider(data);
 
+	if (data->call) {
+		dbus_pending_call_cancel(data->call);
+		dbus_pending_call_unref(data->call);
+	}
+
+	if (data->disconnect_call) {
+		dbus_pending_call_cancel(data->disconnect_call);
+		dbus_pending_call_unref(data->disconnect_call);
+	}
+
+	g_free(data->service_ident);
 	g_free(data->path);
 	g_free(data->ident);
 	g_free(data->state);
 	g_free(data->type);
 	g_free(data->name);
 	g_free(data->host);
-	g_free(data->host_ip);
+	g_strfreev(data->host_ip);
 	g_free(data->domain);
 	g_hash_table_destroy(data->server_routes);
 	g_hash_table_destroy(data->user_routes);
@@ -1619,10 +1874,50 @@ static int save_route(GHashTable *routes, int family, const char *network,
 		route->gateway = g_strdup(gateway);
 
 		g_hash_table_replace(routes, key, route);
-	} else
+	} else {
 		g_free(key);
+		return -EALREADY;
+	}
 
 	return 0;
+}
+
+static void change_provider_split_routing(struct connman_provider *provider,
+							bool split_routing)
+{
+	struct connection_data *data;
+	int err;
+
+	if (!provider)
+		return;
+
+	if (connman_provider_is_split_routing(provider) == split_routing)
+		return;
+
+	data = connman_provider_get_data(provider);
+	if (split_routing && data && provider_is_connected(data) &&
+						!check_routes(provider)) {
+		err = add_network_route(data);
+		if (err) {
+			connman_warn("cannot add network route provider %p",
+								provider);
+			return;
+		}
+	}
+
+	err = connman_provider_set_split_routing(provider, split_routing);
+	switch (err) {
+	case 0:
+		/* fall through */
+	case -EALREADY:
+		break;
+	case -EINVAL:
+		/* fall through */
+	case -EOPNOTSUPP:
+		connman_warn("cannot change split routing %d", err);
+	default:
+		break;
+	}
 }
 
 static int read_route_dict(GHashTable *routes, DBusMessageIter *dicts)
@@ -1801,6 +2096,10 @@ static gboolean property_changed(DBusConnection *conn,
 		g_free(data->domain);
 		data->domain = g_strdup(str);
 		connman_provider_set_domain(data->provider, data->domain);
+	} else if (g_str_equal(key, "SplitRouting")) {
+		dbus_bool_t split_routing;
+		dbus_message_iter_get_basic(&value, &split_routing);
+		change_provider_split_routing(data->provider, split_routing);
 	}
 
 	if (ip_set && err == 0) {
@@ -1812,6 +2111,125 @@ static gboolean property_changed(DBusConnection *conn,
 
 	return TRUE;
 }
+
+static int vpn_find_online_transport_cb(struct connman_service *service,
+							void *user_data)
+{
+	if (connman_service_get_type(service) != CONNMAN_SERVICE_TYPE_VPN) {
+		switch (connman_service_get_state(service)) {
+		case CONNMAN_SERVICE_STATE_ONLINE:
+			*((struct connman_service**)user_data) = service;
+			return 1;
+		default:
+			break;
+		}
+	}
+
+	return 0;
+}
+
+static struct connman_service *vpn_find_online_transport()
+{
+	struct connman_service *service = NULL;
+
+	connman_service_iterate_services(vpn_find_online_transport_cb,
+								&service);
+	return service;
+}
+
+static bool vpn_is_valid_transport(struct connman_service *transport)
+{
+	if (transport) {
+		struct connman_service *online;
+
+		switch (connman_service_get_state(transport)) {
+		case CONNMAN_SERVICE_STATE_READY:
+			online = vpn_find_online_transport();
+
+			/* Stay connected if there are no online services */
+			if (!online)
+				return true;
+
+			DBG("%s is ready, %s is online, disconnecting",
+				connman_service_get_identifier(transport),
+				connman_service_get_identifier(online));
+			break;
+
+		case CONNMAN_SERVICE_STATE_ONLINE:
+			online = vpn_find_online_transport();
+
+			/* Check if our transport is still the default */
+			if (online == transport)
+				return true;
+
+			DBG("%s is replaced by %s as default, disconnecting",
+				connman_service_get_identifier(transport),
+				connman_service_get_identifier(online));
+			break;
+
+		default:
+			break;
+		}
+	} else {
+		DBG("transport gone");
+	}
+
+	return false;
+}
+
+static void vpn_disconnect_check_provider(struct connection_data *data)
+{
+	if (provider_is_connected(data)) {
+		/* With NULL service ident NULL is returned immediately */
+		struct connman_service *service =
+			connman_service_lookup_from_identifier
+						(data->service_ident);
+
+		if (!vpn_is_valid_transport(service)) {
+			connman_provider_disconnect(data->provider);
+		}
+
+		/* VPN moved to be split routed, default route is not set */
+		if (connman_provider_is_split_routing(data->provider))
+			data->default_route_set = false;
+	}
+}
+
+static void vpn_disconnect_check()
+{
+	GHashTableIter iter;
+	gpointer value;
+
+	DBG("");
+	g_hash_table_iter_init(&iter, vpn_connections);
+	while (g_hash_table_iter_next(&iter, NULL, &value))
+		vpn_disconnect_check_provider(value);
+}
+
+static void vpn_service_add(struct connman_service *service, const char *name)
+{
+	vpn_disconnect_check();
+}
+
+static void vpn_service_list_changed(struct connman_service *service)
+{
+	vpn_disconnect_check();
+}
+
+static void vpn_service_state_changed(struct connman_service *service,
+					enum connman_service_state state)
+{
+	vpn_disconnect_check();
+}
+
+static const struct connman_notifier vpn_notifier = {
+	.name                   = "vpn",
+	.priority               = CONNMAN_NOTIFIER_PRIORITY_DEFAULT,
+	.default_changed        = vpn_service_list_changed,
+	.service_add            = vpn_service_add,
+	.service_remove         = vpn_service_list_changed,
+	.service_state_changed  = vpn_service_state_changed
+};
 
 static int vpn_init(void)
 {
@@ -1853,6 +2271,7 @@ static int vpn_init(void)
 		vpnd_created(connection, &provider_driver);
 	}
 
+	connman_notifier_register(&vpn_notifier);
 	return err;
 
 remove:
@@ -1873,6 +2292,7 @@ static void vpn_exit(void)
 	g_dbus_remove_watch(connection, removed_watch);
 	g_dbus_remove_watch(connection, property_watch);
 
+	connman_notifier_unregister(&vpn_notifier);
 	connman_provider_driver_unregister(&provider_driver);
 
 	if (vpn_connections)

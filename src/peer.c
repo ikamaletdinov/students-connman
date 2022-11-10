@@ -82,7 +82,7 @@ static void stop_dhcp_server(struct connman_peer *peer)
 	peer->dhcp_server = NULL;
 
 	if (peer->ip_pool)
-		__connman_ippool_unref(peer->ip_pool);
+		__connman_ippool_free(peer->ip_pool);
 	peer->ip_pool = NULL;
 	peer->lease_ip = 0;
 }
@@ -154,7 +154,7 @@ static int start_dhcp_server(struct connman_peer *peer)
 
 	err = __connman_inet_modify_address(RTM_NEWADDR,
 				NLM_F_REPLACE | NLM_F_ACK, index, AF_INET,
-				gateway, NULL, prefixlen, broadcast);
+				gateway, NULL, prefixlen, broadcast, true);
 	if (err < 0)
 		goto error;
 
@@ -176,7 +176,7 @@ static int start_dhcp_server(struct connman_peer *peer)
 	if (err < 0)
 		goto error;
 
-	g_timeout_add_seconds(0, dhcp_server_started, connman_peer_ref(peer));
+	g_idle_add(dhcp_server_started, connman_peer_ref(peer));
 
 	return 0;
 
@@ -606,6 +606,9 @@ static int peer_connect(struct connman_peer *peer)
 {
 	int err = -ENOTSUP;
 
+	if (is_connected(peer))
+		return -EISCONN;
+
 	if (peer_driver->connect)
 		err = peer_driver->connect(peer,
 					CONNMAN_PEER_WPS_UNKNOWN, NULL);
@@ -758,7 +761,7 @@ void connman_peer_set_name(struct connman_peer *peer, const char *name)
 void connman_peer_set_iface_address(struct connman_peer *peer,
 					const unsigned char *iface_address)
 {
-	memset(peer->iface_address, 0, ETH_ALEN);
+	memset(peer->iface_address, 0, sizeof(peer->iface_address));
 	memcpy(peer->iface_address, iface_address, ETH_ALEN);
 }
 
@@ -905,6 +908,7 @@ int connman_peer_set_state(struct connman_peer *peer,
 		break;
 	case CONNMAN_PEER_STATE_READY:
 		reply_pending(peer, 0);
+		__connman_technology_set_connected(CONNMAN_SERVICE_TYPE_P2P, true);
 		break;
 	case CONNMAN_PEER_STATE_DISCONNECT:
 		if (peer->connection_master)
@@ -913,7 +917,7 @@ int connman_peer_set_state(struct connman_peer *peer,
 			__connman_dhcp_stop(peer->ipconfig);
 		peer->connection_master = false;
 		peer->sub_device = NULL;
-
+		__connman_technology_set_connected(CONNMAN_SERVICE_TYPE_P2P, false);
 		break;
 	case CONNMAN_PEER_STATE_FAILURE:
 		if (manage_peer_error(peer) == 0)
@@ -979,7 +983,10 @@ void connman_peer_add_service(struct connman_peer *peer,
 
 	service = g_malloc0(sizeof(struct _peer_service));
 	service->type = type;
-	service->data = g_memdup(data, data_length * sizeof(unsigned char));
+	if (data_length > 0) {
+		service->data = g_malloc(data_length * sizeof(unsigned char));
+		memcpy(service->data, data, data_length * sizeof(unsigned char));
+	}
 	service->length = data_length;
 
 	peer->services = g_slist_prepend(peer->services, service);
@@ -1174,6 +1181,18 @@ const char *__connman_peer_get_path(struct connman_peer *peer)
 		return NULL;
 
 	return peer->path;
+}
+
+static void disconnect_peer_hash_table(gpointer key,
+					gpointer value, gpointer user_data)
+{
+	struct connman_peer *peer = value;
+	peer_disconnect(peer);
+}
+
+void __connman_peer_disconnect_all(void)
+{
+	g_hash_table_foreach(peers_table, disconnect_peer_hash_table, NULL);
 }
 
 int __connman_peer_init(void)

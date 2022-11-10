@@ -30,9 +30,6 @@
 
 #include "connman.h"
 
-#define STATUS_URL_IPV4  "http://ipv4.connman.net/online/status.html"
-#define STATUS_URL_IPV6  "http://ipv6.connman.net/online/status.html"
-
 struct connman_wispr_message {
 	bool has_error;
 	const char *current_element;
@@ -95,6 +92,10 @@ struct connman_wispr_portal {
 static bool wispr_portal_web_result(GWebResult *result, gpointer user_data);
 
 static GHashTable *wispr_portal_list = NULL;
+
+static char *online_check_ipv4_url = NULL;
+static char *online_check_ipv6_url = NULL;
+static bool enable_online_to_ready_transition = false;
 
 static void connman_wispr_message_init(struct connman_wispr_message *msg)
 {
@@ -450,10 +451,14 @@ static void portal_manage_status(GWebResult *result,
 				&str))
 		connman_info("Client-Timezone: %s", str);
 
-	free_connman_wispr_portal_context(wp_context);
+	if (!enable_online_to_ready_transition)
+		free_connman_wispr_portal_context(wp_context);
 
 	__connman_service_ipconfig_indicate_state(service,
 					CONNMAN_SERVICE_STATE_ONLINE, type);
+
+	if (enable_online_to_ready_transition)
+		__connman_service_online_check(service, type, true);
 }
 
 static bool wispr_route_request(const char *address, int ai_family,
@@ -555,10 +560,29 @@ static void wispr_portal_browser_reply_cb(struct connman_service *service,
 					const char *error, void *user_data)
 {
 	struct connman_wispr_portal_context *wp_context = user_data;
+	struct connman_wispr_portal *wispr_portal;
+	int index;
 
 	DBG("");
 
 	if (!service || !wp_context)
+		return;
+
+	/*
+	 * No way to cancel this if wp_context has been freed, so we lookup
+	 * from the service and check that this is still the right context.
+	 */
+	index = __connman_service_get_index(service);
+	if (index < 0)
+		return;
+
+	wispr_portal = g_hash_table_lookup(wispr_portal_list,
+					GINT_TO_POINTER(index));
+	if (!wispr_portal)
+		return;
+
+	if (wp_context != wispr_portal->ipv4_context &&
+		wp_context != wispr_portal->ipv6_context)
 		return;
 
 	if (!authentication_done) {
@@ -568,7 +592,7 @@ static void wispr_portal_browser_reply_cb(struct connman_service *service,
 	}
 
 	/* Restarting the test */
-	__connman_wispr_start(service, wp_context->type);
+	__connman_service_wispr_start(service, wp_context->type);
 }
 
 static void wispr_portal_request_wispr_login(struct connman_service *service,
@@ -732,7 +756,12 @@ static bool wispr_portal_web_result(GWebResult *result, gpointer user_data)
 					wp_context->redirect_url, wp_context);
 
 		break;
+	case 300:
+	case 301:
 	case 302:
+	case 303:
+	case 307:
+	case 308:
 		if (!g_web_supports_tls() ||
 			!g_web_result_get_header(result, "Location",
 							&redirect)) {
@@ -754,12 +783,8 @@ static bool wispr_portal_web_result(GWebResult *result, gpointer user_data)
 		goto done;
 	case 400:
 	case 404:
-		if (__connman_service_online_check_failed(wp_context->service,
-						wp_context->type) == 0) {
-			wispr_portal_error(wp_context);
-			free_connman_wispr_portal_context(wp_context);
-			return false;
-		}
+		__connman_service_online_check(wp_context->service,
+						wp_context->type, false);
 
 		break;
 	case 505:
@@ -832,8 +857,8 @@ static int wispr_portal_detect(struct connman_wispr_portal_context *wp_context)
 	int err = 0;
 	int i;
 
-	DBG("wispr/portal context %p", wp_context);
-	DBG("service %p", wp_context->service);
+	DBG("wispr/portal context %p service %p", wp_context,
+		wp_context->service);
 
 	service_type = connman_service_get_type(wp_context->service);
 
@@ -884,10 +909,10 @@ static int wispr_portal_detect(struct connman_wispr_portal_context *wp_context)
 
 	if (wp_context->type == CONNMAN_IPCONFIG_TYPE_IPV4) {
 		g_web_set_address_family(wp_context->web, AF_INET);
-		wp_context->status_url = STATUS_URL_IPV4;
+		wp_context->status_url = online_check_ipv4_url;
 	} else {
 		g_web_set_address_family(wp_context->web, AF_INET6);
-		wp_context->status_url = STATUS_URL_IPV6;
+		wp_context->status_url = online_check_ipv6_url;
 	}
 
 	for (i = 0; nameservers[i]; i++)
@@ -906,8 +931,7 @@ static int wispr_portal_detect(struct connman_wispr_portal_context *wp_context)
 			free_connman_wispr_portal_context(wp_context);
 		}
 	} else if (wp_context->timeout == 0) {
-		wp_context->timeout =
-			g_timeout_add_seconds(0, no_proxy_callback, wp_context);
+		wp_context->timeout = g_idle_add(no_proxy_callback, wp_context);
 	}
 
 done:
@@ -973,6 +997,7 @@ int __connman_wispr_start(struct connman_service *service,
 
 void __connman_wispr_stop(struct connman_service *service)
 {
+	struct connman_wispr_portal *wispr_portal;
 	int index;
 
 	DBG("service %p", service);
@@ -984,7 +1009,22 @@ void __connman_wispr_stop(struct connman_service *service)
 	if (index < 0)
 		return;
 
-	g_hash_table_remove(wispr_portal_list, GINT_TO_POINTER(index));
+	wispr_portal = g_hash_table_lookup(wispr_portal_list,
+					GINT_TO_POINTER(index));
+	if (!wispr_portal)
+		return;
+
+	if (wispr_portal->ipv4_context) {
+		if (service == wispr_portal->ipv4_context->service)
+			g_hash_table_remove(wispr_portal_list,
+					GINT_TO_POINTER(index));
+	}
+
+	if (wispr_portal->ipv6_context) {
+		if (service == wispr_portal->ipv6_context->service)
+			g_hash_table_remove(wispr_portal_list,
+					GINT_TO_POINTER(index));
+	}
 }
 
 int __connman_wispr_init(void)
@@ -994,6 +1034,14 @@ int __connman_wispr_init(void)
 	wispr_portal_list = g_hash_table_new_full(g_direct_hash,
 						g_direct_equal, NULL,
 						free_connman_wispr_portal);
+
+	online_check_ipv4_url =
+		connman_setting_get_string("OnlineCheckIPv4URL");
+	online_check_ipv6_url =
+		connman_setting_get_string("OnlineCheckIPv6URL");
+
+	enable_online_to_ready_transition =
+		connman_setting_get_bool("EnableOnlineToReadyTransition");
 
 	return 0;
 }
