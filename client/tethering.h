@@ -2,11 +2,13 @@
  *
  *  Connection Manager
  *
- *  Copyright (C) 2007-2012  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2014  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2018 GlobalLogic. All rights reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
  *  This program is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,17 +21,19 @@
  *
  */
 
-#ifndef __CONNMAN_OPTION_H
-#define __CONNMAN_OPTION_H
+#ifndef __CONNMANCTL_TETHERING_H
+#define __CONNMANCTL_TETHERING_H
+
+#include <dbus/dbus.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-const char *connman_option_get_string(const char *key);
+void __connmanctl_tethering_clients_list(DBusMessageIter *iter);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __CONNMAN_OPTION_H */
+#endif /* __CONNMANCTL_TETHERING_H */

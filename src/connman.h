@@ -54,6 +54,7 @@ DBusMessage *__connman_error_operation_aborted(DBusMessage *msg);
 DBusMessage *__connman_error_operation_timeout(DBusMessage *msg);
 DBusMessage *__connman_error_invalid_service(DBusMessage *msg);
 DBusMessage *__connman_error_invalid_property(DBusMessage *msg);
+DBusMessage *__connman_error_operation_canceled(DBusMessage *msg);
 
 int __connman_manager_init(void);
 void __connman_manager_cleanup(void);
@@ -125,6 +126,8 @@ int __connman_agent_request_peer_authorization(struct connman_peer *peer,
 						bool wps_requested,
 						const char *dbus_sender,
 						void *user_data);
+bool __connman_agent_is_request_pending(struct connman_service *service,
+						const char *dbus_sender);
 
 #include <connman/log.h>
 
@@ -136,8 +139,6 @@ void __connman_log_enable(struct connman_debug_desc *start,
 					struct connman_debug_desc *stop);
 
 #include <connman/backtrace.h>
-
-#include <connman/option.h>
 
 #include <connman/setting.h>
 
@@ -158,9 +159,13 @@ int __connman_inet_modify_address(int cmd, int flags, int index, int family,
 				const char *address,
 				const char *peer,
 				unsigned char prefixlen,
-				const char *broadcast);
+				const char *broadcast,
+				bool is_p2p);
 int __connman_inet_get_interface_address(int index, int family, void *address);
 int __connman_inet_get_interface_ll_address(int index, int family, void *address);
+int __connman_inet_get_interface_mac_address(int index, uint8_t *mac_address);
+
+bool __connman_inet_is_any_addr(const char *address, int family);
 
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
@@ -240,9 +245,16 @@ int __connman_inet_rtnl_addattr32(struct nlmsghdr *n, size_t maxlen,
 int __connman_inet_add_fwmark_rule(uint32_t table_id, int family, uint32_t fwmark);
 int __connman_inet_del_fwmark_rule(uint32_t table_id, int family, uint32_t fwmark);
 int __connman_inet_add_default_to_table(uint32_t table_id, int ifindex, const char *gateway);
+int __connman_inet_add_subnet_to_table(uint32_t table_id, int ifindex,
+			const char *gateway, unsigned char prefixlen);
 int __connman_inet_del_default_from_table(uint32_t table_id, int ifindex, const char *gateway);
+int __connman_inet_del_subnet_from_table(uint32_t table_id, int ifindex,
+			const char *gateway, unsigned char prefixlen);
 int __connman_inet_get_address_netmask(int ifindex,
 		struct sockaddr_in *address, struct sockaddr_in *netmask);
+
+bool __connman_inet_isrootnfs_device(const char *devname);
+char **__connman_inet_get_pnp_nameservers(const char *pnp_file);
 
 #include <connman/resolver.h>
 
@@ -252,6 +264,7 @@ void __connman_resolver_append_fallback_nameservers(void);
 int __connman_resolvfile_append(int index, const char *domain, const char *server);
 int __connman_resolvfile_remove(int index, const char *domain, const char *server);
 int __connman_resolver_redo_servers(int index);
+int __connman_resolver_set_mdns(int index, bool enabled);
 
 GKeyFile *__connman_storage_open_global(void);
 GKeyFile *__connman_storage_load_global(void);
@@ -261,7 +274,6 @@ void __connman_storage_delete_global(void);
 GKeyFile *__connman_storage_load_config(const char *ident);
 GKeyFile *__connman_storage_load_provider_config(const char *ident);
 
-GKeyFile *__connman_storage_open_service(const char *ident);
 int __connman_storage_save_service(GKeyFile *keyfile, const char *ident);
 GKeyFile *__connman_storage_load_provider(const char *identifier);
 void __connman_storage_save_provider(GKeyFile *keyfile, const char *identifier);
@@ -291,6 +303,7 @@ struct connman_ipaddress {
 	char *peer;
 	char *broadcast;
 	char *gateway;
+	bool is_p2p; /* P2P connection or VPN, broadcast is excluded. */
 };
 
 struct connman_ipconfig_ops {
@@ -318,7 +331,6 @@ __connman_ipconfig_ref_debug(struct connman_ipconfig *ipconfig,
 void __connman_ipconfig_unref_debug(struct connman_ipconfig *ipconfig,
 			const char *file, int line, const char *caller);
 
-void __connman_ipconfig_clear_address(struct connman_ipconfig *ipconfig);
 void *__connman_ipconfig_get_data(struct connman_ipconfig *ipconfig);
 void __connman_ipconfig_set_data(struct connman_ipconfig *ipconfig, void *data);
 
@@ -411,9 +423,9 @@ void __connman_ipconfig_set_dhcpv6_prefixes(struct connman_ipconfig *ipconfig,
 					char **prefixes);
 char **__connman_ipconfig_get_dhcpv6_prefixes(struct connman_ipconfig *ipconfig);
 
-int __connman_ipconfig_load(struct connman_ipconfig *ipconfig,
+void __connman_ipconfig_load(struct connman_ipconfig *ipconfig,
 		GKeyFile *keyfile, const char *identifier, const char *prefix);
-int __connman_ipconfig_save(struct connman_ipconfig *ipconfig,
+void __connman_ipconfig_save(struct connman_ipconfig *ipconfig,
 		GKeyFile *keyfile, const char *identifier, const char *prefix);
 bool __connman_ipconfig_ipv6_privacy_enabled(struct connman_ipconfig *ipconfig);
 int __connman_ipconfig_ipv6_reset_privacy(struct connman_ipconfig *ipconfig);
@@ -439,8 +451,12 @@ char **__connman_timeserver_system_get();
 GSList *__connman_timeserver_add_list(GSList *server_list,
 		const char *timeserver);
 GSList *__connman_timeserver_get_all(struct connman_service *service);
-int __connman_timeserver_sync(struct connman_service *service);
-void __connman_timeserver_sync_next();
+void __connman_timeserver_sync(struct connman_service *service,
+				enum connman_timeserver_sync_reason reason);
+void __connman_timeserver_conf_update(struct connman_service *service);
+
+bool __connman_timeserver_is_synced(void);
+void __connman_timeserver_set_synced(bool status);
 
 enum __connman_dhcpv6_status {
 	CONNMAN_DHCPV6_STATUS_FAIL     = 0,
@@ -459,6 +475,7 @@ int __connman_dhcp_start(struct connman_ipconfig *ipconfig,
 			struct connman_network *network, dhcp_cb callback,
 			gpointer user_data);
 void __connman_dhcp_stop(struct connman_ipconfig *ipconfig);
+void __connman_dhcp_decline(struct connman_ipconfig *ipconfig);
 int __connman_dhcp_init(void);
 void __connman_dhcp_cleanup(void);
 int __connman_dhcpv6_init(void);
@@ -492,10 +509,13 @@ int __connman_connection_gateway_add(struct connman_service *service,
 void __connman_connection_gateway_remove(struct connman_service *service,
 					enum connman_ipconfig_type type);
 int __connman_connection_get_vpn_index(int phy_index);
+int __connman_connection_get_vpn_phy_index(int vpn_index);
 
 bool __connman_connection_update_gateway(void);
 
-int __connman_ntp_start(char *server);
+typedef void (*__connman_ntp_cb_t) (bool success, void *user_data);
+int __connman_ntp_start(char *server, __connman_ntp_cb_t callback,
+			void *user_data);
 void __connman_ntp_stop();
 
 int __connman_wpad_init(void);
@@ -553,10 +573,12 @@ void __connman_device_list(DBusMessageIter *iter, void *user_data);
 enum connman_service_type __connman_device_get_service_type(struct connman_device *device);
 struct connman_device *__connman_device_find_device(enum connman_service_type type);
 int __connman_device_request_scan(enum connman_service_type type);
+int __connman_device_request_scan_full(enum connman_service_type type);
 int __connman_device_request_hidden_scan(struct connman_device *device,
 				const char *ssid, unsigned int ssid_len,
 				const char *identity, const char *passphrase,
 				const char *security, void *user_data);
+void __connman_device_stop_scan(enum connman_service_type type);
 
 bool __connman_device_isfiltered(const char *devname);
 
@@ -586,6 +608,7 @@ void __connman_network_set_device(struct connman_network *network,
 
 int __connman_network_connect(struct connman_network *network);
 int __connman_network_disconnect(struct connman_network *network);
+int __connman_network_forget(struct connman_network *network);
 int __connman_network_clear_ipconfig(struct connman_network *network,
 					struct connman_ipconfig *ipconfig);
 int __connman_network_enable_ipconfig(struct connman_network *network,
@@ -595,6 +618,7 @@ const char *__connman_network_get_type(struct connman_network *network);
 const char *__connman_network_get_group(struct connman_network *network);
 const char *__connman_network_get_ident(struct connman_network *network);
 bool __connman_network_get_weakness(struct connman_network *network);
+bool __connman_network_native_autoconnect(struct connman_network *network);
 
 int __connman_config_init();
 void __connman_config_cleanup(void);
@@ -616,12 +640,15 @@ bool __connman_config_get_bool(GKeyFile *key_file,
 bool __connman_config_address_provisioned(const char *address,
 					const char *netmask);
 
+#include <connman/tethering.h>
+
 int __connman_tethering_init(void);
 void __connman_tethering_cleanup(void);
 
 const char *__connman_tethering_get_bridge(void);
-void __connman_tethering_set_enabled(void);
+int __connman_tethering_set_enabled(void);
 void __connman_tethering_set_disabled(void);
+void __connman_tethering_list_clients(DBusMessageIter *array);
 
 int __connman_private_network_request(DBusMessage *msg, const char *owner);
 int __connman_private_network_release(const char *path);
@@ -639,6 +666,8 @@ void __connman_provider_list(DBusMessageIter *iter, void *user_data);
 bool __connman_provider_is_immutable(struct connman_provider *provider);
 int __connman_provider_create_and_connect(DBusMessage *msg);
 const char * __connman_provider_get_ident(struct connman_provider *provider);
+const char * __connman_provider_get_transport_ident(
+					struct connman_provider *provider);
 int __connman_provider_indicate_state(struct connman_provider *provider,
 					enum connman_provider_state state);
 int __connman_provider_indicate_error(struct connman_provider *provider,
@@ -653,6 +682,8 @@ int __connman_provider_init(void);
 
 int __connman_service_init(void);
 void __connman_service_cleanup(void);
+int __connman_service_move(struct connman_service *service,
+				struct connman_service *target, bool before);
 int __connman_service_load_modifiable(struct connman_service *service);
 
 void __connman_service_list_struct(DBusMessageIter *iter);
@@ -661,11 +692,9 @@ int __connman_service_compare(const struct connman_service *a,
 					const struct connman_service *b);
 
 struct connman_service *__connman_service_lookup_from_index(int index);
-struct connman_service *__connman_service_lookup_from_ident(const char *identifier);
 struct connman_service *__connman_service_create_from_network(struct connman_network *network);
 struct connman_service *__connman_service_create_from_provider(struct connman_provider *provider);
 bool __connman_service_index_is_default(int index);
-struct connman_service *__connman_service_get_default(void);
 void __connman_service_update_from_network(struct connman_network *network);
 void __connman_service_remove_from_network(struct connman_network *network);
 void __connman_service_read_ip4config(struct connman_service *service);
@@ -677,13 +706,14 @@ struct connman_ipconfig *__connman_service_get_ip6config(
 				struct connman_service *service);
 struct connman_ipconfig *__connman_service_get_ipconfig(
 				struct connman_service *service, int family);
+void __connman_service_notify_ipv4_configuration(
+				struct connman_service *service);
+void __connman_service_wispr_start(struct connman_service *service,
+                                enum connman_ipconfig_type type);
 bool __connman_service_is_connected_state(struct connman_service *service,
 					enum connman_ipconfig_type type);
-const char *__connman_service_get_ident(struct connman_service *service);
 const char *__connman_service_get_path(struct connman_service *service);
 const char *__connman_service_get_name(struct connman_service *service);
-unsigned int __connman_service_get_order(struct connman_service *service);
-enum connman_service_state __connman_service_get_state(struct connman_service *service);
 struct connman_network *__connman_service_get_network(struct connman_service *service);
 enum connman_service_security __connman_service_get_security(struct connman_service *service);
 const char *__connman_service_get_phase2(struct connman_service *service);
@@ -699,11 +729,14 @@ int __connman_service_set_ignore(struct connman_service *service,
 						bool ignore);
 void __connman_service_set_search_domains(struct connman_service *service,
 					char **domains);
+int __connman_service_set_mdns(struct connman_service *service,
+					bool enabled);
 
 void __connman_service_set_string(struct connman_service *service,
 					const char *key, const char *value);
-int __connman_service_online_check_failed(struct connman_service *service,
-					enum connman_ipconfig_type type);
+void __connman_service_online_check(struct connman_service *service,
+					enum connman_ipconfig_type type,
+					bool success);
 int __connman_service_ipconfig_indicate_state(struct connman_service *service,
 					enum connman_service_state new_state,
 					enum connman_ipconfig_type type);
@@ -719,7 +752,6 @@ int __connman_service_indicate_default(struct connman_service *service);
 int __connman_service_connect(struct connman_service *service,
 			enum connman_service_connect_reason reason);
 int __connman_service_disconnect(struct connman_service *service);
-int __connman_service_disconnect_all(void);
 void __connman_service_set_active_session(bool enable, GSList *list);
 void __connman_service_auto_connect(enum connman_service_connect_reason reason);
 bool __connman_service_remove(struct connman_service *service);
@@ -761,6 +793,9 @@ void __connman_service_set_pac(struct connman_service *service,
 bool __connman_service_is_hidden(struct connman_service *service);
 bool __connman_service_is_split_routing(struct connman_service *service);
 bool __connman_service_index_is_split_routing(int index);
+void __connman_service_set_split_routing(struct connman_service *service,
+						bool split_routing);
+void __connman_service_split_routing_changed(struct connman_service *service);
 int __connman_service_get_index(struct connman_service *service);
 void __connman_service_set_hidden(struct connman_service *service);
 void __connman_service_set_hostname(struct connman_service *service,
@@ -776,6 +811,14 @@ void __connman_service_set_identity(struct connman_service *service,
 					const char *identity);
 void __connman_service_set_anonymous_identity(struct connman_service *service,
 					const char *anonymous_identity);
+void __connman_service_set_subject_match(struct connman_service *service,
+					const char *subject_match);
+void __connman_service_set_altsubject_match(struct connman_service *service,
+					const char *altsubject_match);
+void __connman_service_set_domain_suffix_match(struct connman_service *service,
+					const char *domain_suffix_match);
+void __connman_service_set_domain_match(struct connman_service *service,
+					const char *domain_match);
 void __connman_service_set_agent_identity(struct connman_service *service,
 						const char *agent_identity);
 int __connman_service_set_passphrase(struct connman_service *service,
@@ -803,6 +846,7 @@ void __connman_peer_cleanup(void);
 
 void __connman_peer_list_struct(DBusMessageIter *array);
 const char *__connman_peer_get_path(struct connman_peer *peer);
+void __connman_peer_disconnect_all(void);
 
 int __connman_peer_service_init(void);
 void __connman_peer_service_cleanup(void);
@@ -821,11 +865,6 @@ int __connman_peer_service_unregister(const char *owner,
 					int query_length, int version);
 
 #include <connman/session.h>
-
-typedef void (* service_iterate_cb) (struct connman_service *service,
-					void *user_data);
-
-int __connman_service_iterate_services(service_iterate_cb cb, void *user_data);
 
 void __connman_service_mark_dirty();
 void __connman_service_save(struct connman_service *service);
@@ -899,35 +938,47 @@ int __connman_stats_get(struct connman_service *service,
 				bool roaming,
 				struct connman_stats_data *data);
 
-int __connman_iptables_dump(const char *table_name);
-int __connman_iptables_new_chain(const char *table_name,
-					const char *chain);
-int __connman_iptables_delete_chain(const char *table_name,
-					const char *chain);
-int __connman_iptables_flush_chain(const char *table_name,
-					const char *chain);
-int __connman_iptables_change_policy(const char *table_name,
-					const char *chain,
-					const char *policy);
-int __connman_iptables_append(const char *table_name,
-			const char *chain,
-			const char *rule_spec);
-int __connman_iptables_insert(const char *table_name,
-			const char *chain,
-			const char *rule_spec);
-int __connman_iptables_delete(const char *table_name,
-			const char *chain,
-			const char *rule_spec);
+int __connman_iptables_dump(int type,
+				const char *table_name);
+int __connman_iptables_new_chain(int type,
+				const char *table_name,
+				const char *chain);
+int __connman_iptables_delete_chain(int type,
+				const char *table_name,
+				const char *chain);
+int __connman_iptables_flush_chain(int type,
+				const char *table_name,
+				const char *chain);
+int __connman_iptables_find_chain(int type,
+				const char *table_name,
+				const char *chain);
+int __connman_iptables_change_policy(int type,
+				const char *table_name,
+				const char *chain,
+				const char *policy);
+int __connman_iptables_append(int type,
+				const char *table_name,
+				const char *chain,
+				const char *rule_spec);
+int __connman_iptables_insert(int type,
+				const char *table_name,
+				const char *chain,
+				const char *rule_spec);
+int __connman_iptables_delete(int type,
+				const char *table_name,
+				const char *chain,
+				const char *rule_spec);
 
 typedef void (*connman_iptables_iterate_chains_cb_t) (const char *chain_name,
 							void *user_data);
-int __connman_iptables_iterate_chains(const char *table_name,
+int __connman_iptables_iterate_chains(int type,
+				const char *table_name,
 				connman_iptables_iterate_chains_cb_t cb,
 				void *user_data);
 
 int __connman_iptables_init(void);
 void __connman_iptables_cleanup(void);
-int __connman_iptables_commit(const char *table_name);
+int __connman_iptables_commit(int type, const char *table_name);
 
 int __connman_dnsproxy_init(void);
 void __connman_dnsproxy_cleanup(void);
@@ -935,6 +986,8 @@ int __connman_dnsproxy_add_listener(int index);
 void __connman_dnsproxy_remove_listener(int index);
 int __connman_dnsproxy_append(int index, const char *domain, const char *server);
 int __connman_dnsproxy_remove(int index, const char *domain, const char *server);
+int __connman_dnsproxy_set_mdns(int index, bool enabled);
+void __connman_dnsproxy_set_listen_port(unsigned int port);
 
 int __connman_6to4_probe(struct connman_service *service);
 void __connman_6to4_remove(struct connman_ipconfig *ipconfig);
@@ -948,15 +1001,7 @@ typedef void (*ippool_collision_cb_t) (struct connman_ippool *pool,
 int __connman_ippool_init(void);
 void __connman_ippool_cleanup(void);
 
-#define __connman_ippool_ref(ipconfig) \
-	__connman_ippool_ref_debug(ipconfig, __FILE__, __LINE__, __func__)
-#define __connman_ippool_unref(ipconfig) \
-	__connman_ippool_unref_debug(ipconfig, __FILE__, __LINE__, __func__)
-
-struct connman_ippool *__connman_ippool_ref_debug(struct connman_ippool *pool,
-			const char *file, int line, const char *caller);
-void __connman_ippool_unref_debug(struct connman_ippool *pool,
-			const char *file, int line, const char *caller);
+void __connman_ippool_free(struct connman_ippool *pool);
 
 struct connman_ippool *__connman_ippool_create(int index,
 					unsigned int start,
@@ -992,16 +1037,19 @@ struct firewall_context;
 
 struct firewall_context *__connman_firewall_create(void);
 void __connman_firewall_destroy(struct firewall_context *ctx);
-int __connman_firewall_add_rule(struct firewall_context *ctx,
-				const char *table,
-				const char *chain,
-				const char *rule_fmt, ...);
-int __connman_firewall_remove_rule(struct firewall_context *ctx, int id);
-int __connman_firewall_enable_rule(struct firewall_context *ctx, int id);
-int __connman_firewall_disable_rule(struct firewall_context *ctx, int id);
-int __connman_firewall_enable(struct firewall_context *ctx);
-int __connman_firewall_disable(struct firewall_context *ctx);
-bool __connman_firewall_is_up(void);
+int __connman_firewall_enable_nat(struct firewall_context *ctx,
+					char *address, unsigned char prefixlen,
+					char *interface);
+int __connman_firewall_disable_nat(struct firewall_context *ctx);
+int __connman_firewall_enable_snat(struct firewall_context *ctx,
+				int index, const char *ifname,
+				const char *addr);
+int __connman_firewall_disable_snat(struct firewall_context *ctx);
+int __connman_firewall_enable_marking(struct firewall_context *ctx,
+					enum connman_session_id_type id_type,
+					char *id, const char *src_ip,
+					uint32_t mark);
+int __connman_firewall_disable_marking(struct firewall_context *ctx);
 
 int __connman_firewall_init(void);
 void __connman_firewall_cleanup(void);
@@ -1044,5 +1092,6 @@ int __connman_machine_init(void);
 void __connman_machine_cleanup(void);
 
 int __connman_util_get_random(uint64_t *val);
+unsigned int __connman_util_random_delay_ms(unsigned int secs);
 int __connman_util_init(void);
 void __connman_util_cleanup(void);

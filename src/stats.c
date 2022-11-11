@@ -23,7 +23,6 @@
 #include <config.h>
 #endif
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -54,7 +53,7 @@
  *
  * File properties:
  *   The ring buffer is mmap to a file
- *   Initialy only the smallest possible amount of disk space is allocated
+ *   Initially only the smallest possible amount of disk space is allocated
  *   The files grow to the configured maximal size
  *   The grows by _SC_PAGESIZE step size
  *   For each service a file is created
@@ -81,8 +80,8 @@
  *
  * History file:
  *   Same format as the ring buffer file
- *   For a period of at least 2 months dayly records are keept
- *   If older, then only a monthly record is keept
+ *   For a period of at least 2 months daily records are kept
+ *   If older, then only a monthly record is kept
  */
 
 
@@ -227,18 +226,14 @@ static void stats_free(gpointer user_data)
 	munmap(file->addr, file->len);
 	file->addr = NULL;
 
-	TFR(close(file->fd));
+	close(file->fd);
 	file->fd = -1;
 
-	if (file->history_name) {
-		g_free(file->history_name);
-		file->history_name = NULL;
-	}
+	g_free(file->history_name);
+	file->history_name = NULL;
 
-	if (file->name) {
-		g_free(file->name);
-		file->name = NULL;
-	}
+	g_free(file->name);
+	file->name = NULL;
 
 	g_free(file);
 }
@@ -353,7 +348,7 @@ static int stats_open_temp(struct stats_file *file)
 					STORAGEDIR);
 	file->fd = g_mkstemp_full(file->name, O_RDWR | O_CREAT, 0644);
 	if (file->fd < 0) {
-		connman_error("create tempory file error %s for %s",
+		connman_error("create temporary file error %s for %s",
 				strerror(errno), file->name);
 		g_free(file->name);
 		file->name = NULL;
@@ -377,7 +372,8 @@ static int stats_file_setup(struct stats_file *file)
 		connman_error("fstat error %s for %s\n",
 			strerror(errno), file->name);
 
-		TFR(close(file->fd));
+		close(file->fd);
+		file->fd = -1;
 		g_free(file->name);
 		file->name = NULL;
 
@@ -392,7 +388,8 @@ static int stats_file_setup(struct stats_file *file)
 
 	err = stats_file_remap(file, size);
 	if (err < 0) {
-		TFR(close(file->fd));
+		close(file->fd);
+		file->fd = -1;
 		g_free(file->name);
 		file->name = NULL;
 
@@ -621,7 +618,7 @@ static int stats_file_close_swap(struct stats_file *history_file,
 	stats_file_unmap(history_file);
 	stats_file_unmap(temp_file);
 
-	TFR(close(temp_file->fd));
+	close(temp_file->fd);
 
 	unlink(history_file->name);
 
@@ -629,7 +626,7 @@ static int stats_file_close_swap(struct stats_file *history_file,
 
 	unlink(temp_file->name);
 
-	TFR(close(history_file->fd));
+	close(history_file->fd);
 
 	stats_file_cleanup(history_file);
 	stats_file_cleanup(temp_file);
@@ -648,6 +645,9 @@ static int stats_file_history_update(struct stats_file *data_file)
 
 	bzero(history_file, sizeof(struct stats_file));
 	bzero(temp_file, sizeof(struct stats_file));
+
+	history_file->fd = -1;
+	temp_file->fd = -1;
 
 	err = stats_open(history_file, data_file->history_name);
 	if (err < 0)
@@ -676,19 +676,8 @@ int __connman_stats_service_register(struct connman_service *service)
 
 	DBG("service %p", service);
 
-	file = g_hash_table_lookup(stats_hash, service);
-	if (!file) {
-		file = g_try_new0(struct stats_file, 1);
-		if (!file)
-			return -ENOMEM;
-
-		g_hash_table_insert(stats_hash, service, file);
-	} else {
-		return -EALREADY;
-	}
-
 	dir = g_strdup_printf("%s/%s", STORAGEDIR,
-				__connman_service_get_ident(service));
+				connman_service_get_identifier(service));
 
 	/* If the dir doesn't exist, create it */
 	if (!g_file_test(dir, G_FILE_TEST_IS_DIR)) {
@@ -703,11 +692,23 @@ int __connman_stats_service_register(struct connman_service *service)
 	}
 
 	g_free(dir);
+	file = g_hash_table_lookup(stats_hash, service);
+	if (!file) {
+		file = g_try_new0(struct stats_file, 1);
+		if (!file)
+			return -ENOMEM;
+
+		file->fd = -1;
+
+		g_hash_table_insert(stats_hash, service, file);
+	} else {
+		return -EALREADY;
+	}
 
 	name = g_strdup_printf("%s/%s/data", STORAGEDIR,
-				__connman_service_get_ident(service));
+				connman_service_get_identifier(service));
 	file->history_name = g_strdup_printf("%s/%s/history", STORAGEDIR,
-				__connman_service_get_ident(service));
+				connman_service_get_identifier(service));
 
 	/* TODO: Use a global config file instead of hard coded value. */
 	file->account_period_offset = 1;

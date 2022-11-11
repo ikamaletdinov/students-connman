@@ -238,12 +238,12 @@ int connman_agent_queue_message(void *user_context,
 	driver = get_driver();
 	DBG("driver %p", driver);
 
-	if (driver && driver->context_ref) {
+	if (driver && driver->context_ref)
 		queue_data->user_context = driver->context_ref(user_context);
-		queue_data->driver = driver;
-	} else
+	else
 		queue_data->user_context = user_context;
 
+	queue_data->driver = driver;
 	queue_data->msg = dbus_message_ref(msg);
 	queue_data->timeout = timeout;
 	queue_data->callback = callback;
@@ -255,6 +255,28 @@ int connman_agent_queue_message(void *user_context,
 		DBG("send next request failed (%s/%d)", strerror(-err), -err);
 
 	return err;
+}
+
+bool connman_agent_queue_search(void *user_context, void *agent_data)
+{
+	struct connman_agent *agent = agent_data;
+	struct connman_agent_request *queue_data;
+	GList *iter;
+
+	if (!agent || !user_context)
+		return false;
+
+	if (agent->pending && agent->pending->user_context == user_context)
+		return true;
+
+	for (iter = agent->queue; iter; iter = iter->next) {
+		queue_data = iter->data;
+
+		if (queue_data && queue_data->user_context == user_context)
+			return true;
+	}
+
+	return false;
 }
 
 static void set_default_agent(void)
@@ -366,9 +388,9 @@ static void report_error_reply(DBusMessage *reply, void *user_data)
 			retry = true;
 	}
 
+out:
 	report_error->callback(report_error->user_context, retry,
 			report_error->user_data);
-out:
 	g_free(report_error);
 }
 

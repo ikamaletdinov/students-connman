@@ -79,6 +79,7 @@ typedef enum {
 #define G_DHCP_HOST_NAME	0x0c
 #define G_DHCP_MTU		0x1a
 #define G_DHCP_NTP_SERVER	0x2a
+#define G_DHCP_VENDOR_CLASS_ID	0x3c
 #define G_DHCP_CLIENT_ID	0x3d
 
 #define G_DHCPV6_CLIENTID	1
@@ -133,6 +134,7 @@ GDHCPClient *g_dhcp_client_new(GDHCPType type, int index,
 
 int g_dhcp_client_start(GDHCPClient *client, const char *last_address);
 void g_dhcp_client_stop(GDHCPClient *client);
+int g_dhcp_client_decline(GDHCPClient *client, uint32_t requested);
 
 GDHCPClient *g_dhcp_client_ref(GDHCPClient *client);
 void g_dhcp_client_unref(GDHCPClient *client);
@@ -230,9 +232,6 @@ void g_dhcp_server_set_save_lease(GDHCPServer *dhcp_server,
 				GDHCPSaveLeaseFunc func, gpointer user_data);
 void g_dhcp_server_set_lease_added_cb(GDHCPServer *dhcp_server,
 							GDHCPLeaseAddedCb cb);
-
-int dhcp_get_random(uint64_t *val);
-void dhcp_cleanup_random(void);
 
 #ifdef __cplusplus
 }

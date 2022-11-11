@@ -270,6 +270,8 @@ static void gadget_tech_enable_tethering(struct connman_technology *technology,
 		connman_inet_ifup(index);
 
 		connman_inet_add_to_bridge(index, bridge);
+
+		gadget_tethering = true;
 	}
 }
 
@@ -286,11 +288,12 @@ static void gadget_tech_disable_tethering(struct connman_technology *technology,
 		connman_inet_ifdown(index);
 
 		connman_technology_tethering_notify(technology, false);
+
+		gadget_tethering = false;
 	}
 }
 
 static int gadget_tech_set_tethering(struct connman_technology *technology,
-				const char *identifier, const char *passphrase,
 				const char *bridge, bool enabled)
 {
 	DBG("bridge %s enabled %d", bridge, enabled);
